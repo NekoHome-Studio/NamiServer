@@ -1,0 +1,30 @@
+# Runtime data and credentials
+.env
+.env.local
+data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.log
+
+# Build / tooling output
+node_modules/
+.npm-cache/
+dist/
+
+# Local scratch (probes, demos, verification runs)
+.demo/
+.verify/
+tmp/
+*.tar.gz
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Python (the AstrBot plugin's selftest sets sys.dont_write_bytecode, but be safe)
+__pycache__/
+*.py[cod]

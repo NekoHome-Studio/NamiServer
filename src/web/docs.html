@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nami · API 参考</title>
+<style>
+  :root {
+    --bg: #0b0e14; --surface: #11151d; --surface-2: #161b24; --border: #232a36;
+    --text: #d7dce5; --muted: #8b94a3; --accent: #5fb8ff;
+    --get: #34d399; --post: #60a5fa; --put: #fbbf24; --delete: #f87171;
+    --mono: ui-monospace, "Cascadia Code", Consolas, "SF Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); line-height: 1.6;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  a { color: var(--accent); }
+  code, pre { font-family: var(--mono); font-size: 12.5px; }
+  code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+  pre {
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; margin: 10px 0;
+  }
+  header {
+    border-bottom: 1px solid var(--border); padding: 22px 32px;
+    position: sticky; top: 0; background: rgba(11,14,20,.94); backdrop-filter: blur(8px); z-index: 5;
+  }
+  .row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  h1 { font-size: 19px; margin: 0; }
+  .sub { color: var(--muted); font-size: 13px; }
+  main { max-width: 1080px; margin: 0 auto; padding: 26px 32px 90px; }
+  .lede { color: var(--muted); font-size: 13.5px; white-space: pre-wrap; margin: 0 0 18px; }
+  .callout {
+    background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    border-radius: 8px; padding: 12px 16px; margin: 16px 0; font-size: 13.5px;
+  }
+  .toolbar { display: flex; gap: 10px; align-items: center; margin: 20px 0 8px; flex-wrap: wrap; }
+  input[type=search] {
+    flex: 1; min-width: 220px; background: var(--surface); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 9px 13px; font-size: 13.5px;
+  }
+  input[type=search]:focus { outline: none; border-color: var(--accent); }
+  .count { color: var(--muted); font-size: 12.5px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .09em; color: var(--muted);
+       margin: 34px 0 12px; font-weight: 600; }
+  .group-desc { color: var(--muted); font-size: 13px; margin: -6px 0 14px; }
+  .op {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    margin-bottom: 10px; overflow: hidden;
+  }
+  .op-head {
+    display: flex; align-items: center; gap: 12px; padding: 12px 16px; cursor: pointer; user-select: none;
+  }
+  .op-head:hover { background: var(--surface-2); }
+  .method {
+    font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: .05em;
+    padding: 3px 8px; border-radius: 5px; color: #0b0e14; min-width: 58px; text-align: center;
+  }
+  .m-GET { background: var(--get); } .m-POST { background: var(--post); }
+  .m-PUT { background: var(--put); } .m-DELETE { background: var(--delete); }
+  .path { font-family: var(--mono); font-size: 13px; }
+  .summary { color: var(--muted); font-size: 13px; margin-left: auto; text-align: right; }
+  .op-body { padding: 4px 16px 18px; border-top: 1px solid var(--border); display: none; }
+  .op.open .op-body { display: block; }
+  .op-body h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .07em;
+                color: var(--muted); margin: 18px 0 6px; font-weight: 600; }
+  .desc { font-size: 13.5px; white-space: pre-wrap; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  td.mono, th.mono { font-family: var(--mono); font-size: 12.5px; }
+  .pill {
+    font-size: 11px; padding: 2px 7px; border-radius: 999px;
+    background: var(--surface-2); border: 1px solid var(--border); color: var(--muted);
+  }
+  .pill.required { color: #fbbf24; border-color: #6b4a1f; }
+  .empty { color: var(--muted); font-size: 13.5px; padding: 20px 0; }
+  footer { color: var(--muted); font-size: 12.5px; border-top: 1px solid var(--border);
+           margin-top: 40px; padding-top: 16px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="row">
+    <h1>🌊 Nami <span class="sub">API 参考</span></h1>
+    <span class="pill" id="version">…</span>
+    <span class="pill" id="provider">…</span>
+    <a class="sub" href="/admin" style="margin-left:auto">管理面板 →</a>
+    <a class="sub" href="/openapi.json">/openapi.json</a>
+  </div>
+</header>
+
+<main>
+  <p class="lede" id="lede">正在加载规范…</p>
+
+  <div class="callout" id="auth-note"></div>
+
+  <div class="toolbar">
+    <input type="search" id="filter" placeholder="按路径、方法或说明筛选…" autocomplete="off">
+    <span class="count" id="count"></span>
+  </div>
+
+  <div id="groups"></div>
+
+  <footer>
+    本页由 <code>/openapi.json</code> 实时渲染。规范与实现的一致性由端到端测试校验，不会静默漂移。
+  </footer>
+</main>
+
+<script>
+(function () {
+  'use strict';
+
+  var state = { spec: null, filter: '' };
+
+  function esc(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  /** Resolves a local `#/components/...` $ref one level deep. */
+  function resolve(node) {
+    if (!node || typeof node !== 'object') return node;
+    var ref = node.$ref;
+    if (typeof ref !== 'string' || ref.indexOf('#/') !== 0) return node;
+    var parts = ref.slice(2).split('/');
+    var current = state.spec;
+    for (var i = 0; i < parts.length; i += 1) {
+      if (current == null) return node;
+      current = current[parts[i]];
+    }
+    return current || node;
+  }
+
+  function schemaSummary(schema, depth) {
+    var resolved = resolve(schema);
+    if (!resolved || typeof resolved !== 'object') return '';
+    depth = depth || 0;
+
+    if (resolved.oneOf) {
+      return resolved.oneOf.map(function (part) { return schemaSummary(part, depth); }).join(' | ');
+    }
+    if (resolved.enum) return resolved.enum.map(function (v) { return JSON.stringify(v); }).join(' | ');
+    if (resolved.const !== undefined) return JSON.stringify(resolved.const);
+
+    var type = resolved.type;
+    if (Array.isArray(type)) return type.join(' | ');
+    if (type === 'array') {
+      var inner = schemaSummary(resolved.items, depth);
+      return (inner || 'any') + '[]';
+    }
+    if (type === 'object' && resolved.properties && depth < 2) {
+      var names = Object.keys(resolved.properties);
+      if (names.length === 0) return 'object';
+      if (names.length > 6) return 'object{' + names.slice(0, 6).join(', ') + ', …}';
+      return 'object{' + names.join(', ') + '}';
+    }
+    return type || 'any';
+  }
+
+  function curlFor(method, path, operation) {
+    var base = window.location.origin;
+    var url = base + path.replace(/\{([^}]+)\}/g, 'REPLACE_ME');
+    var lines = ['curl -s ' + (method === 'GET' ? '' : '-X ' + method + ' ') + url];
+    lines[0] = lines[0].replace(/\s+/g, ' ').trim();
+
+    var secured = !(operation.security && operation.security.length === 0);
+    if (secured) lines.push("  -H 'Authorization: Bearer $NAMI_API_KEY'");
+
+    var body = operation.requestBody;
+    if (body && body.content && body.content['application/json']) {
+      lines.push("  -H 'Content-Type: application/json'");
+      lines.push("  -d '" + exampleFor(body.content['application/json'].schema) + "'");
+    }
+    return lines.join(' \\\n');
+  }
+
+  /** Builds a small example payload from a schema. */
+  function exampleFor(schema) {
+    var resolved = resolve(schema);
+    if (!resolved || typeof resolved !== 'object') return '{}';
+
+    if (resolved.properties) {
+      var out = {};
+      Object.keys(resolved.properties).forEach(function (key) {
+        var prop = resolve(resolved.properties[key]);
+        if (!prop) return;
+        if (prop.enum && prop.enum.length) out[key] = prop.enum[0];
+        else if (prop.const !== undefined) out[key] = prop.const;
+        else if (prop.type === 'array') out[key] = [];
+        else if (prop.type === 'boolean') out[key] = false;
+        else if (prop.type === 'integer' || prop.type === 'number') out[key] = prop.default != null ? prop.default : 0;
+        else if (prop.type === 'object') out[key] = {};
+        else out[key] = prop.description ? '…' : 'string';
+      });
+      return JSON.stringify(out);
+    }
+    return '{}';
+  }
+
+  function renderParameters(operation) {
+    var params = operation.parameters || [];
+    if (!params.length) return '';
+    var rows = params.map(function (param) {
+      return '<tr>'
+        + '<td class="mono">' + esc(param.name) + '</td>'
+        + '<td>' + esc(param.in) + '</td>'
+        + '<td>' + (param.required
+            ? '<span class="pill required">必填</span>'
+            : '<span class="pill">可选</span>') + '</td>'
+        + '<td class="mono">' + esc(schemaSummary(param.schema)) + '</td>'
+        + '<td>' + esc((resolve(param.schema) || {}).description || '') + '</td>'
+        + '</tr>';
+    }).join('');
+    return '<h3>参数</h3><table><thead><tr><th>名称</th><th>位置</th><th>要求</th><th>类型</th><th>说明</th></tr></thead><tbody>'
+      + rows + '</tbody></table>';
+  }
+
+  function renderBody(operation) {
+    var body = operation.requestBody;
+    if (!body || !body.content || !body.content['application/json']) return '';
+    var schema = body.content['application/json'].schema;
+    var resolved = resolve(schema);
+    return '<h3>请求体</h3><pre>' + esc(JSON.stringify(resolved, null, 2)) + '</pre>';
+  }
+
+  function renderResponses(operation) {
+    var responses = operation.responses || {};
+    var keys = Object.keys(responses);
+    if (!keys.length) return '';
+    var items = keys.map(function (code) {
+      var response = resolve(responses[code]) || {};
+      var content = response.content && (response.content['application/json'] || response.content['text/html']);
+      var schema = content && content.schema ? resolve(content.schema) : null;
+      var detail = schema ? '<pre>' + esc(JSON.stringify(schema, null, 2)) + '</pre>' : '';
+      return '<tr><td class="mono">' + esc(code) + '</td><td>' + esc(response.description || '') + detail + '</td></tr>';
+    }).join('');
+    return '<h3>响应</h3><table><tbody>' + items + '</tbody></table>';
+  }
+
+  function operationMatches(method, path, operation, needle) {
+    if (!needle) return true;
+    var haystack = [method, path, operation.summary, operation.description]
+      .concat((operation.tags || []))
+      .join(' ').toLowerCase();
+    return haystack.indexOf(needle) !== -1;
+  }
+
+  function render() {
+    var spec = state.spec;
+    if (!spec) return;
+    var needle = state.filter.trim().toLowerCase();
+    var paths = spec.paths || {};
+    var byTag = {};
+    var tagOrder = (spec.tags || []).map(function (tag) { return tag.name; });
+    var shown = 0;
+    var total = 0;
+
+    tagOrder.forEach(function (tag) { byTag[tag] = { desc: '', ops: [] }; });
+    (spec.tags || []).forEach(function (tag) { if (byTag[tag.name]) byTag[tag.name].desc = tag.description || ''; });
+
+    Object.keys(paths).forEach(function (path) {
+      Object.keys(paths[path]).forEach(function (method) {
+        var operation = paths[path][method];
+        if (!operation || typeof operation !== 'object') return;
+        total += 1;
+        var tag = (operation.tags && operation.tags[0]) || 'Other';
+        if (!byTag[tag]) byTag[tag] = { desc: '', ops: [] };
+        if (!operationMatches(method, path, operation, needle)) return;
+        shown += 1;
+        byTag[tag].ops.push({ method: method.toUpperCase(), path: path, operation: operation });
+      });
+    });
+
+    var html = '';
+    tagOrder.concat(Object.keys(byTag).filter(function (t) { return tagOrder.indexOf(t) === -1; }))
+      .forEach(function (tag) {
+        var group = byTag[tag];
+        if (!group || group.ops.length === 0) return;
+        html += '<h2>' + esc(tag) + '</h2>';
+        if (group.desc) html += '<p class="group-desc">' + esc(group.desc) + '</p>';
+        group.ops.forEach(function (entry) {
+          var op = entry.operation;
+          html += '<section class="op">'
+            + '<div class="op-head">'
+            + '<span class="method m-' + esc(entry.method) + '">' + esc(entry.method) + '</span>'
+            + '<span class="path">' + esc(entry.path) + '</span>'
+            + '<span class="summary">' + esc(op.summary || '') + '</span>'
+            + '</div>'
+            + '<div class="op-body">'
+            + (op.description ? '<p class="desc">' + esc(op.description) + '</p>' : '')
+            + renderParameters(op)
+            + renderBody(op)
+            + '<h3>示例</h3><pre>' + esc(curlFor(entry.method, entry.path, op)) + '</pre>'
+            + renderResponses(op)
+            + '</div></section>';
+        });
+      });
+
+    document.getElementById('groups').innerHTML = html ||
+      '<p class="empty">没有匹配的端点。</p>';
+    document.getElementById('count').textContent = needle
+      ? '匹配 ' + shown + ' / ' + total + ' 个端点'
+      : '共 ' + total + ' 个端点';
+
+    Array.prototype.forEach.call(document.querySelectorAll('.op-head'), function (head) {
+      head.addEventListener('click', function () {
+        head.parentNode.classList.toggle('open');
+      });
+    });
+  }
+
+  function fail(message) {
+    document.getElementById('lede').textContent = '无法加载 /openapi.json：' + message;
+    document.getElementById('lede').style.color = '#f87171';
+  }
+
+  fetch('/openapi.json', { headers: { accept: 'application/json' } })
+    .then(function (response) {
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      return response.json();
+    })
+    .then(function (spec) {
+      state.spec = spec;
+      var info = spec.info || {};
+      document.title = (info.title || 'Nami') + ' · API 参考';
+      document.getElementById('version').textContent = 'v' + (info.version || '?');
+      document.getElementById('provider').textContent = window.location.origin + '/v1';
+      document.getElementById('lede').textContent = info.description || '';
+      document.getElementById('auth-note').innerHTML =
+        '所有 <code>/v1/*</code> 与 <code>/admin/api/*</code> 端点都需要凭证：'
+        + '<code>Authorization: Bearer &lt;NAMI_API_KEYS 中的某个 key&gt;</code>。'
+        + 'admin 端点还接受 <code>X-Admin-Token</code>。'
+        + '<code>/healthz</code>、<code>/readyz</code>、<code>/admin</code>、<code>/docs</code> 与 <code>/openapi.json</code> 无需鉴权。';
+      render();
+    })
+    .catch(function (error) { fail(error.message); });
+
+  document.getElementById('filter').addEventListener('input', function (event) {
+    state.filter = event.target.value;
+    render();
+  });
+})();
+</script>
+</body>
+</html>

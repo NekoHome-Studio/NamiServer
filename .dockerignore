@@ -1,0 +1,52 @@
+# Build context filter for Nami.
+#
+# Keep the context to source code only: the image has zero runtime
+# dependencies, so nothing here is ever needed inside the container.
+
+# --- Dependencies and caches (dev-only tooling; never shipped) ---
+node_modules
+**/node_modules
+.npm-cache
+.npm
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Runtime state: databases and logs must never be baked into an image ---
+data
+**/data
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.log
+logs
+
+# --- Secrets: real configuration stays on the host ---
+# `.env.*` deliberately also excludes `.env.example`, so the image ships code
+# only and never a configuration template.
+.env
+.env.*
+*.pem
+*.key
+
+# --- Version control, editors, OS cruft ---
+.git
+.gitignore
+.gitattributes
+.dockerignore
+Dockerfile
+docker-compose.yml
+docker-compose.*.yml
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Documentation and local dev config ---
+*.md
+.npmrc
+tsconfig.json

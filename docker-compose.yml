@@ -1,0 +1,81 @@
+# Nami — Docker Compose deployment.
+#
+#   docker compose up -d --build
+#   docker compose logs -f nami        # the generated API key appears here
+#
+# Secrets live in a `.env` file next to this one (see `.env.example`). The
+# long `env_file` form below marks it as OPTIONAL (Compose v2.24+), so a fresh
+# checkout boots with no configuration at all: the offline mock provider is
+# used and Nami generates a random API key, printing it to the container log.
+
+services:
+  nami:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nami-server:latest
+    container_name: nami-server
+    restart: unless-stopped
+
+    ports:
+      - "8787:8787"
+
+    # Optional overlay: values in `.env` are injected only if that file exists.
+    # Explicit `environment:` entries below win over env_file values.
+    env_file:
+      - path: .env
+        required: false
+
+    environment:
+      # Binding to 0.0.0.0 inside the container is what makes the port mapping
+      # above reachable from the host.
+      NAMI_HOST: 0.0.0.0
+      NAMI_PORT: "8787"
+      NAMI_DB_PATH: /app/data/nami.sqlite
+
+      # --- Useful examples (uncomment what you need) -------------------------
+      # Real model instead of the offline mock provider:
+      # NAMI_LLM_PROVIDER: openai
+      # NAMI_LLM_BASE_URL: https://api.openai.com/v1
+      # NAMI_LLM_API_KEY: sk-replace-me
+      # NAMI_LLM_MODEL: gpt-4o-mini
+      # ...or DeepSeek:
+      # NAMI_LLM_BASE_URL: https://api.deepseek.com/v1
+      # NAMI_LLM_MODEL: deepseek-chat
+      # ...or Ollama running on the Docker host (any non-empty API key works):
+      # NAMI_LLM_BASE_URL: http://host.docker.internal:11434/v1
+      # NAMI_LLM_MODEL: llama3.1
+
+      # Fixed credentials instead of a generated key. Comma-separated.
+      # NAMI_API_KEYS: nami_change_me_please
+      # Token required by /admin/api/* (falls back to accepting API keys).
+      # NAMI_ADMIN_TOKEN: nami_admin_change_me_please
+
+      # Dangerous tools are off by default; enabling them needs an allowlist.
+      # NAMI_TOOL_HTTP_ENABLED: "true"
+      # NAMI_TOOL_HTTP_ALLOW_HOSTS: api.github.com,*.wikipedia.org
+      # NAMI_TOOL_FS_ENABLED: "true"
+      # NAMI_TOOL_FS_ALLOW_ROOTS: /app/data
+
+    volumes:
+      # SQLite state survives `docker compose down` / image rebuilds.
+      - nami-data:/app/data
+
+    healthcheck:
+      # Mirrors the Dockerfile healthcheck: Node's built-in fetch, since alpine
+      # has no curl/wget.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  nami-data:
+    driver: local

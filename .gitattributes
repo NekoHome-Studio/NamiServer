@@ -1,0 +1,30 @@
+# Normalise line endings for a Windows-developed, Linux-deployed project.
+# Without this, `git config core.autocrlf=true` (the Windows default) checks
+# CRLF back out, which breaks the Dockerfile, shebangs, and .env parsing.
+* text=auto eol=lf
+
+# Binary assets must never be converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.zip binary
+*.gz binary
+*.sqlite binary
+
+# Keep the container and config files unambiguously LF.
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.ts text eol=lf
+*.js text eol=lf
+*.py text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+.env.example text eol=lf

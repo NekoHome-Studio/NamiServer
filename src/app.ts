@@ -1,0 +1,32 @@
+/**
+ * Shared dependency container handed to every route module.
+ */
+
+import type { Config } from './config.ts';
+import type { Logger } from './logger.ts';
+import type { LLMProvider } from './llm/types.ts';
+import type { ModelRouter } from './llm/router.ts';
+import type { Metrics } from './metrics.ts';
+import type { OneBotBridge } from './onebot/bridge.ts';
+import type { OneBotClient } from './onebot/client.ts';
+import type { RateLimiter } from './ratelimit.ts';
+import type { SessionStore } from './store/store.ts';
+import type { ToolRegistry } from './tools/registry.ts';
+
+export interface AppDeps {
+  config: Config;
+  log: Logger;
+  store: SessionStore;
+  registry: ToolRegistry;
+  provider: LLMProvider;
+  /** Model catalogue plus per-request routing and exposure policy. */
+  models: ModelRouter;
+  limiter: RateLimiter;
+  metrics: Metrics;
+  /** OneBot v11 HTTP client. Always present; `config.onebot.enabled` gates use. */
+  onebotClient: OneBotClient;
+  /** Inbound QQ bridge, also the source of the connector's counters. */
+  onebotBridge: OneBotBridge;
+  /** Epoch ms when the process finished booting. */
+  startedAt: number;
+}

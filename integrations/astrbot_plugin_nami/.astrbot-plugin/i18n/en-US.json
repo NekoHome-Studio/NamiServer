@@ -1,0 +1,77 @@
+{
+  "metadata": {
+    "display_name": "Nami Bridge",
+    "short_desc": "Connect AstrBot to a self-hosted Nami agent server.",
+    "desc": "Connects AstrBot to Nami, a self-hosted OpenAI-compatible AI agent server: direct bridge commands, an optional auto-reply listener, and a WebUI console page."
+  },
+  "config": {
+    "nami_base_url": {
+      "description": "Nami OpenAI-compatible base URL",
+      "hint": "The /v1 suffix matters, e.g. http://127.0.0.1:8787/v1 . Used by /nami ask and by auto reply."
+    },
+    "nami_host_root": {
+      "description": "Nami service root URL",
+      "hint": "Used for /healthz, /readyz and /admin/api/*. Must be the root, without a trailing /v1, e.g. http://127.0.0.1:8787 ."
+    },
+    "nami_api_key": {
+      "description": "Nami API key",
+      "hint": "One of Nami's NAMI_API_KEYS. When empty Nami answers 401 missing_api_key."
+    },
+    "nami_admin_token": {
+      "description": "Nami admin token",
+      "hint": "Nami's NAMI_ADMIN_TOKEN, required for /admin/api/* (tool and session listings). Leave empty when Nami has no admin token."
+    },
+    "default_model": {
+      "description": "Default model",
+      "hint": "Empty lets Nami pick its own default. When set it must exist in GET /v1/models."
+    },
+    "request_timeout": {
+      "description": "Request timeout (seconds)",
+      "hint": "Longest wait for a single Nami call. 60-120 is sensible for local models."
+    },
+    "system_prompt": {
+      "description": "Extra system prompt",
+      "hint": "Optional. Prepended as a system message to every request from this plugin."
+    },
+    "session_scope": {
+      "description": "Session scope",
+      "hint": "Controls how X-Nami-Session is derived: user (per sender), group (per chat, private falls back to user), global (one shared Nami session).",
+      "labels": ["Per user", "Per group", "Global"]
+    },
+    "enable_commands": {
+      "description": "Enable the /nami commands",
+      "hint": "When off the /nami command group reports that it is disabled; the Dashboard page and auto reply are unaffected."
+    },
+    "admin_only": {
+      "description": "Admins only",
+      "hint": "When on, only AstrBot administrators may use the /nami command group."
+    },
+    "auto_reply_enabled": {
+      "description": "Enable auto reply (costs tokens!)",
+      "hint": "Off by default. When on, every matching message triggers a Nami request and burns tokens and compute. Read the README warning first."
+    },
+    "auto_reply_trigger": {
+      "description": "Auto reply trigger",
+      "hint": "mention: only when mentioned or when the keyword appears; prefix: only when the message starts with the prefix; all: every non-empty message (highest token cost).",
+      "labels": ["Mention or keyword", "Prefix", "All messages"]
+    },
+    "auto_reply_prefix": {
+      "description": "Auto reply prefix",
+      "hint": "Used when auto_reply_trigger=prefix. Default /ai ."
+    },
+    "mention_keyword": {
+      "description": "Mention keyword",
+      "hint": "With auto_reply_trigger=mention, a message containing this word also counts as a mention (for platforms without reliable @). Empty means platform @ only."
+    },
+    "max_reply_chars": {
+      "description": "Max reply characters",
+      "hint": "Replies longer than this are truncated so they do not flood the chat or get rejected by the platform."
+    }
+  },
+  "pages": {
+    "nami": {
+      "title": "Nami Console",
+      "description": "Inspect Nami health, readiness, models, tools and sessions, and ask questions directly."
+    }
+  }
+}

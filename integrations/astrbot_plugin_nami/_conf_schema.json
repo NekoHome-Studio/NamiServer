@@ -1,0 +1,104 @@
+{
+  "nami_base_url": {
+    "type": "string",
+    "description": "Nami OpenAI 兼容接口地址",
+    "hint": "/v1 后缀很重要，例如 http://127.0.0.1:8787/v1 。/nami 问 与自动回复都走这个地址。",
+    "obvious_hint": true,
+    "default": "http://127.0.0.1:8787/v1"
+  },
+  "nami_host_root": {
+    "type": "string",
+    "description": "Nami 服务根地址",
+    "hint": "用于 /healthz、/readyz 与 /admin/api/*。必须是根地址，结尾不要带 /v1，例如 http://127.0.0.1:8787 。",
+    "obvious_hint": true,
+    "default": "http://127.0.0.1:8787"
+  },
+  "nami_api_key": {
+    "type": "string",
+    "description": "Nami API Key",
+    "hint": "对应 Nami 的 NAMI_API_KEYS 之一。留空时 Nami 会返回 401 missing_api_key。",
+    "obvious_hint": true,
+    "secret": true,
+    "default": ""
+  },
+  "nami_admin_token": {
+    "type": "string",
+    "description": "Nami 管理令牌",
+    "hint": "对应 Nami 的 NAMI_ADMIN_TOKEN，用于 /admin/api/*（工具列表、会话列表）。未配置管理令牌时留空即可。",
+    "obvious_hint": true,
+    "secret": true,
+    "default": ""
+  },
+  "default_model": {
+    "type": "string",
+    "description": "默认模型",
+    "hint": "留空表示由 Nami 自己选择默认模型；填写时必须存在于 GET /v1/models 的返回里。",
+    "default": ""
+  },
+  "request_timeout": {
+    "type": "int",
+    "description": "请求超时（秒）",
+    "hint": "单次调用 Nami 的最长等待时间，本地小模型建议 60~120。",
+    "default": 60
+  },
+  "system_prompt": {
+    "type": "text",
+    "description": "附加系统提示词",
+    "hint": "可选。填写后会作为 system 消息加在本轮提问之前，用于给 Nami 设定场景。",
+    "default": ""
+  },
+  "session_scope": {
+    "type": "string",
+    "description": "会话作用域",
+    "hint": "决定 X-Nami-Session 如何生成：user 按发送者、group 按群聊（私聊回退到 user）、global 全局共用一个 Nami 会话。",
+    "options": ["user", "group", "global"],
+    "labels": ["按用户", "按群聊", "全局共用"],
+    "default": "group"
+  },
+  "enable_commands": {
+    "type": "bool",
+    "description": "启用 /nami 指令",
+    "hint": "关闭后 /nami 指令组会直接提示已禁用，但 Dashboard Page 与自动回复不受影响。",
+    "default": true
+  },
+  "admin_only": {
+    "type": "bool",
+    "description": "仅管理员可用",
+    "hint": "开启后只有 AstrBot 管理员能使用 /nami 指令组。",
+    "default": false
+  },
+  "auto_reply_enabled": {
+    "type": "bool",
+    "description": "启用自动回复（会消耗 token！）",
+    "hint": "默认关闭。开启后每一条命中触发条件的消息都会请求一次 Nami，直接消耗 token 与推理算力，请务必先阅读 README 的警告。",
+    "obvious_hint": true,
+    "default": false
+  },
+  "auto_reply_trigger": {
+    "type": "string",
+    "description": "自动回复触发条件",
+    "hint": "mention：被 @ 或包含关键词时；prefix：消息以指定前缀开头时；all：所有非空消息（token 消耗最大）。",
+    "options": ["mention", "prefix", "all"],
+    "labels": ["被 @ 或关键词", "指定前缀", "全部消息"],
+    "default": "mention"
+  },
+  "auto_reply_prefix": {
+    "type": "string",
+    "description": "自动回复前缀",
+    "hint": "auto_reply_trigger=prefix 时生效，默认 /ai 。",
+    "default": "/ai"
+  },
+  "mention_keyword": {
+    "type": "string",
+    "description": "提及关键词",
+    "hint": "auto_reply_trigger=mention 时，消息里出现该词也视为被提及（部分平台无法识别 @ 时使用）。留空表示只认平台 @。",
+    "default": ""
+  },
+  "max_reply_chars": {
+    "type": "int",
+    "description": "回复最大字符数",
+    "hint": "超过该长度的 Nami 回复会被截断，避免刷屏或被平台拒收。",
+    "slider": {"min": 100, "max": 5000, "step": 100},
+    "default": 1500
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "neko-nami-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Nami - a self-hosted agent server carrier: pluggable LLM adapters, sandboxed tool loop, OpenAI-compatible REST + WebSocket gateway.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/index.ts",
+    "dev": "node --disable-warning=ExperimentalWarning --watch src/index.ts",
+    "ollama": "node --disable-warning=ExperimentalWarning scripts/ollama.ts",
+    "typecheck": "tsc --noEmit",
+    "check:portability": "node --disable-warning=ExperimentalWarning scripts/check-portability.ts",
+    "smoke": "node --disable-warning=ExperimentalWarning scripts/smoke.ts",
+    "test": "npm run typecheck && npm run check:portability && npm run smoke"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

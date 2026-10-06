@@ -1,0 +1,6 @@
+# astrbot_plugin_nami 没有第三方 Python 依赖。
+#
+# 网络请求使用 aiohttp（全异步），而 aiohttp 是 AstrBot 本体自带的依赖，
+# 因此这里不需要声明任何包，留空即可让 AstrBot 正常加载插件。
+#
+# 本文件刻意保持为空（只有注释），以保证插件在离线环境下也能被解析。

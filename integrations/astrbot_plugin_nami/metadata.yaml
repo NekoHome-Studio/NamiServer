@@ -1,0 +1,23 @@
+name: astrbot_plugin_nami
+display_name: "Nami 直连"
+desc: "把 AstrBot 接到自建的 Nami（OpenAI 兼容的自托管 AI Agent 服务）：指令直连、可选自动回复、WebUI 控制台。"
+short_desc: "把 AstrBot 接到自建的 Nami Agent 服务"
+version: "1.0.0"
+author: "NekoHome"
+# 填成你自己的仓库地址后再取消注释；AstrBot 的插件详情页会用它做跳转链接。
+# repo: "https://github.com/<你的账号>/neko-NamiServer"
+astrbot_version: ">=4.10.4,<5"
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - telegram
+  - discord
+  - slack
+  - lark
+  - dingtalk
+  - kook
+  - satori
+  - misskey
+  - line
+  - matrix
+  - vocechat

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nami 控制台</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="hero">
+        <div class="hero-text">
+          <h1 id="page-title">Nami 控制台</h1>
+          <p id="page-subtitle" class="muted">
+            通过 AstrBot 后端代理查看 Nami 的运行状态、模型、工具与会话；API Key 永远不会下发到浏览器。
+          </p>
+        </div>
+        <div class="hero-meta">
+          <span id="refresh-state" class="pill pill-idle">自动刷新已暂停</span>
+          <span id="last-updated" class="muted small">尚未刷新</span>
+        </div>
+      </header>
+
+      <section id="banner" class="banner banner-info" aria-live="polite">
+        <div class="banner-title" id="banner-title">正在读取插件配置…</div>
+        <div class="banner-body" id="banner-body"></div>
+      </section>
+
+      <section class="cards" id="cards">
+        <article class="card"><h2>健康</h2><p class="card-value" id="card-health">—</p><p class="card-sub muted" id="card-health-sub"></p></article>
+        <article class="card"><h2>就绪</h2><p class="card-value" id="card-ready">—</p><p class="card-sub muted" id="card-ready-sub"></p></article>
+        <article class="card"><h2>Provider / 模型</h2><p class="card-value" id="card-model">—</p><p class="card-sub muted" id="card-provider"></p></article>
+        <article class="card"><h2>运行时长</h2><p class="card-value" id="card-uptime">—</p><p class="card-sub muted" id="card-uptime-sub"></p></article>
+        <article class="card"><h2>工具</h2><p class="card-value" id="card-tools">—</p><p class="card-sub muted" id="card-tools-sub"></p></article>
+        <article class="card"><h2>Nami 会话</h2><p class="card-value" id="card-sessions">—</p><p class="card-sub muted" id="card-sessions-sub"></p></article>
+        <article class="card"><h2>累计请求</h2><p class="card-value" id="card-requests">—</p><p class="card-sub muted" id="card-requests-sub"></p></article>
+        <article class="card"><h2>插件会话映射</h2><p class="card-value" id="card-scopes">—</p><p class="card-sub muted" id="card-scopes-sub"></p></article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>模型目录</h2>
+          <button type="button" id="reload-models" class="btn">刷新</button>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr><th>模型 id</th><th>别名指向</th><th>参数</th><th>量化</th><th>体积</th><th>归属</th></tr>
+            </thead>
+            <tbody id="models-body">
+              <tr><td colspan="6" class="muted">加载中…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>工具</h2>
+          <span class="muted small" id="tools-summary"></span>
+        </div>
+        <ul class="tool-list" id="tools-list">
+          <li class="muted">加载中…</li>
+        </ul>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Nami 会话</h2>
+          <button type="button" id="reload-sessions" class="btn">刷新</button>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr><th>会话 id</th><th>标题</th><th>消息数</th><th>更新时间</th><th></th></tr>
+            </thead>
+            <tbody id="sessions-body">
+              <tr><td colspan="5" class="muted">加载中…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>直接提问</h2>
+          <span class="muted small">走当前插件配置的地址与密钥，会话 astrbot:web</span>
+        </div>
+        <div class="ask-row">
+          <input type="text" id="ask-input" class="input" placeholder="输入问题，回车发送" autocomplete="off" />
+          <button type="button" id="ask-send" class="btn btn-primary">发送</button>
+        </div>
+        <pre class="answer" id="ask-answer">（还没有提问）</pre>
+      </section>
+
+      <footer class="muted small">
+        最多每 5 秒自动刷新一次；页面切到后台时会暂停，切回前台立即刷新。
+      </footer>
+    </div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
