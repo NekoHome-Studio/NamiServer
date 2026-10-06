@@ -68,18 +68,46 @@ export function createNamiServer(deps: AppDeps): NamiServer {
 
   // Pages and the machine-readable spec are all unauthenticated: they contain no
   // data, and API consumers need the contract before they have a key.
-  const htmlHeaders = (): Record<string, string> => ({
+
+  /**
+   * CSP for the **self-contained** documents (`/admin/classic`, `/docs`).
+   *
+   * Both carry every byte of their JS and CSS inline, so `'unsafe-inline'` is
+   * exactly what they need and nothing else. `default-src 'none'` then stops
+   * them from pulling in any external resource at all.
+   */
+  const inlineHtmlHeaders = (): Record<string, string> => ({
     'cache-control': 'no-cache',
     'content-security-policy':
       "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'",
     'x-content-type-options': 'nosniff',
   });
 
+  /**
+   * CSP for the **built WebUI** at `/admin`.
+   *
+   * This one must differ from {@link inlineHtmlHeaders}, because the SPA is its
+   * exact opposite: `index.html` pulls its JS and CSS from external files under
+   * `/admin/assets/`. Serving it with the inline-only policy silently blocked
+   * the module script and the stylesheet in every browser — a blank page that
+   * neither curl (which does not evaluate CSP) nor a status-code assertion can
+   * see. Hence `'self'` in both `script-src` and `style-src`.
+   *
+   * `style-src` keeps `'unsafe-inline'` on purpose: Vuetify writes the active
+   * theme's CSS variables into a `<style>` element at runtime.
+   */
+  const spaHtmlHeaders = (): Record<string, string> => ({
+    'cache-control': 'no-cache',
+    'content-security-policy':
+      "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'",
+    'x-content-type-options': 'nosniff',
+  });
+
   const serveClassicPanel = (ctx: RequestContext): void => {
-    sendText(ctx.res, 200, getPanelHtml(), 'text/html; charset=utf-8', htmlHeaders());
+    sendText(ctx.res, 200, getPanelHtml(), 'text/html; charset=utf-8', inlineHtmlHeaders());
   };
   const serveDocs = (ctx: RequestContext): void => {
-    sendText(ctx.res, 200, getDocsHtml(), 'text/html; charset=utf-8', htmlHeaders());
+    sendText(ctx.res, 200, getDocsHtml(), 'text/html; charset=utf-8', inlineHtmlHeaders());
   };
 
   // The classic single-file panel stays reachable at /admin/classic. It is both
@@ -109,7 +137,7 @@ export function createNamiServer(deps: AppDeps): NamiServer {
     if (indexHtml === null) return false; // no build: let the router 404
 
     if (path === '/admin' || path === '/admin/') {
-      sendText(res, 200, indexHtml, 'text/html; charset=utf-8', htmlHeaders());
+      sendText(res, 200, indexHtml, 'text/html; charset=utf-8', spaHtmlHeaders());
       return true;
     }
 
@@ -122,7 +150,7 @@ export function createNamiServer(deps: AppDeps): NamiServer {
         sendError(res, 404, `No such asset: ${path}`, { code: 'not_found' });
         return true;
       }
-      sendText(res, 200, indexHtml, 'text/html; charset=utf-8', htmlHeaders());
+      sendText(res, 200, indexHtml, 'text/html; charset=utf-8', spaHtmlHeaders());
       return true;
     }
 

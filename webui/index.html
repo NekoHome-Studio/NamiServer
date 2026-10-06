@@ -5,7 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="robots" content="noindex, nofollow" />
     <meta name="description" content="Nami Agent Server 控制台" />
-    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <!--
+      Absolute rather than `./favicon.svg`: the console is opened as `/admin`
+      (no trailing slash), where a relative href resolves against the site root
+      and 404s. Vite prepends `base` to an absolute public path, so this ships
+      as `/admin/favicon.svg`.
+    -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <title>Nami · 控制台</title>
   </head>
   <body>

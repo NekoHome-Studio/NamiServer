@@ -830,15 +830,59 @@ async function testAdminAndPanel(main: Fixture): Promise<void> {
   const panel = await http(main, 'GET', '/admin', { key: null });
   equal('/admin 无需鉴权返回 200', panel.status, 200);
   check('/admin 返回 HTML', (panel.headers.get('content-type') ?? '').includes('text/html'));
-  check('/admin 设置 CSP 头', panel.headers.get('content-security-policy') !== null);
+  /*
+   * The shell's JS and CSS are EXTERNAL files under /admin/assets, so the policy
+   * must contain `'self'`. It once shipped with the inline-only policy that the
+   * self-contained classic panel needs; browsers then refused to load the module
+   * script and the stylesheet and rendered a blank page, while curl and every
+   * status-code assertion kept passing. Assert the directive, not the header's
+   * presence.
+   */
+  const csp = panel.headers.get('content-security-policy') ?? '';
+  check('/admin 设置 CSP 头', csp !== '');
+  check('/admin 的 CSP 允许同源脚本', /script-src[^;]*'self'/.test(csp), csp);
+  check('/admin 的 CSP 允许同源样式', /style-src[^;]*'self'/.test(csp), csp);
+  check('/admin 的 CSP 未放开任意来源脚本', !/script-src[^;]*\*/.test(csp), csp);
   check('/admin 设置 nosniff', panel.headers.get('x-content-type-options') === 'nosniff');
   check('/admin 是 SPA 外壳（含挂载点）', panel.body.includes('id="app"'), panel.body.slice(0, 160));
   check('/admin 外壳引用了构建产物', /\/admin\/assets\/.+\.js/.test(panel.body));
+
+  // The referenced entry script must actually be servable, with a JS MIME type:
+  // a 404 or a text/plain here is another blank page that no CSP test catches.
+  const shellAsset = /(\/admin\/assets\/[^"']+\.js)/.exec(panel.body)?.[1] ?? '';
+  check('/admin 外壳里的入口脚本路径可解析', shellAsset !== '', panel.body.slice(0, 200));
+  if (shellAsset !== '') {
+    const asset = await http(main, 'GET', shellAsset, { key: null });
+    equal(`入口脚本 ${shellAsset} 可取 → 200`, asset.status, 200);
+    check(
+      '入口脚本以 JS MIME 返回',
+      /javascript/.test(asset.headers.get('content-type') ?? ''),
+      asset.headers.get('content-type') ?? '',
+    );
+  }
 
   // The classic panel is the no-build escape hatch, and must stay reachable.
   const classic = await http(main, 'GET', '/admin/classic', { key: null });
   equal('/admin/classic 仍然可用', classic.status, 200);
   check('/admin/classic 是完整面板', classic.body.length > 2000, `${classic.body.length} 字节`);
+
+  // Its policy is the *opposite* of the shell's, so the two cannot share one.
+  const classicCsp = classic.headers.get('content-security-policy') ?? '';
+  check(
+    '/admin/classic 的 CSP 允许内联脚本（自包含单文件）',
+    /script-src[^;]*'unsafe-inline'/.test(classicCsp),
+    classicCsp,
+  );
+  check(
+    'classic 与 SPA 的 CSP 不同（共用一套必然弄坏一个）',
+    classicCsp !== csp,
+    `classic=${classicCsp}`,
+  );
+
+  // /docs is also self-contained HTML and must keep working.
+  const docs = await http(main, 'GET', '/docs', { key: null });
+  const docsCsp = docs.headers.get('content-security-policy') ?? '';
+  check('/docs 的 CSP 允许内联脚本', /script-src[^;]*'unsafe-inline'/.test(docsCsp), docsCsp);
 
   // Hash routing means any /admin sub-path returns the same shell.
   const deepLink = await http(main, 'GET', '/admin/some/deep/route', { key: null });
