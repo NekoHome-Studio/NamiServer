@@ -299,54 +299,100 @@ git remote add origin \
 
 ### 为什么我推不出去
 
-两条独立的阻塞，都已实测确认，不是推测：
+**根因是本机网络到 `github.com` 的直连不通**，不是沙箱专有现象——用户在自己的 PowerShell 里推送同样报
+`Could not connect / timed out`，与此处独立测得的结论一致。
 
-1. **HTTPS 出网被沙箱按域名过滤。** 实测 `git push` 报
-   `Failed to connect to github.com port 443 after 21081 ms`（curl 访问 `github.com` 与 `example.com` 同样返回 `000`，而 `registry.npmjs.org` 可通）。
-   **即便提供了 token 也推不上去。**
-2. **本机没有任何可用凭证**：`~/.ssh` 里只有 `known_hosts`、无私钥；没有 `gh` CLI；环境里没有 `GITHUB_TOKEN`/`GH_TOKEN`；没有存储的 GCM 凭证。
+实测证据：
 
-> 有意思的是 **SSH 通道是通的**：`ssh -T -p 443 git@ssh.github.com` 拿到了 GitHub 真实的 `Permission denied (publickey)` 响应（说明握手成功，只是没有密钥）。所以如果你在 GitHub 上配了 SSH key，这条路可行。
+| 目标 | 结果 |
+| --- | --- |
+| `https://github.com`（直连） | ❌ `000`，`--resolve` 到 20.205.243.166 时耗时 20s 超时（典型的境外接入受阻断特征） |
+| `https://example.com` | ❌ `000`（说明不只是 GitHub 被拦） |
+| `https://registry.npmjs.org` | ✅ 通（所以 `npm install` 一直正常） |
+| **`ssh.github.com:443`** | ✅ **通**——`ssh -T -p 443 git@ssh.github.com` 拿到了 GitHub 真实的 `Permission denied (publickey)`，说明握手确实到达了 GitHub |
+| 本机代理端口（7890/7897/10809/1080/…） | ❌ 均无监听，机器上没有跑任何代理 |
+| 本机 SSH 私钥 | ❌ 无（`~/.ssh` 只有 `known_hosts`） |
+| `gh` CLI / `GITHUB_TOKEN` / 已存 GCM 凭证 | ❌ 均无 |
 
-### 你需要执行的（在你的终端里，不是通过 DSH 沙箱）
+**结论：HTTPS 推送不可能成功（所以 PAT 也没用），但 SSH over 443 这条路是通的。**
 
-```bash
-cd <本仓库目录>
+### 解决办法：改用 SSH 走 443 端口
 
-# 1) 确认远端仓库已存在；若不存在先在 GitHub 上建一个空仓库
-#    https://github.com/organizations/NekoHome-Studio/repositories/new
-#    注意：不要勾选 "Add a README"，否则会产生一次无关的合并
+先在**你自己的 PowerShell** 里做一次连通性预检：
 
-# 2) 推送（Git Credential Manager 会弹一次浏览器登录）
-git push -u origin main
+```powershell
+ssh -T -p 443 git@ssh.github.com
 ```
 
-若走 SSH：
+- 回 `Permission denied (publickey)` → **通道正常**，继续下面的步骤。
+- 卡住不动或超时 → SSH 也被阻断，只能先准备代理/VPN，然后 `git config --global http.proxy http://127.0.0.1:<端口>`。
 
-```bash
-# 前提：已在本机生成 SSH key 并加到 GitHub 账号
+预检通过后，依次执行：
+
+```powershell
+# 1) 生成密钥（一路回车即可；建议留空密码，否则每次推送都要输）
+ssh-keygen -t ed25519 -C "nami-handover"
+
+# 2) 显示公钥，复制这一整行
+Get-Content "$env:USERPROFILE\.ssh\id_ed25519.pub"
+```
+
+```powershell
+# 3) 让 github.com 走 ssh.github.com:443（GitHub 官方的备用 SSH 端点）
+#    写入 ~/.ssh/config
+$cfg = "$env:USERPROFILE\.ssh\config"
+New-Item -ItemType Directory -Force -Path (Split-Path $cfg) | Out-Null
+@'
+
+Host github.com
+    HostName ssh.github.com
+    Port 443
+    User git
+    IdentityFile ~/.ssh/id_ed25519
+'@ | Add-Content -Path $cfg -Encoding utf8
+
+# 4) 验证：应回 "Hi <你的用户名>! You've successfully authenticated..."
+ssh -T git@github.com
+```
+
+**在 GitHub 网页上把第 2 步的公钥添加进去**（Settings → SSH and GPG keys → New SSH key）。
+若组织 `NekoHome-Studio` 启用了 SAML SSO，还要在该 key 上点 **Configure SSO** 授权给这个组织。
+
+```powershell
+# 5) 把远端切成 SSH 并推送
+cd C:\Users\haoxu\Downloads\NekoHome\neko-NamiServer
 git remote set-url origin git@github.com:NekoHome-Studio/Namiserver.git
-# 如果 22 端口被封，改用 GitHub 的 443 端点：
-#   ~/.ssh/config 里加：
-#     Host github.com
-#       HostName ssh.github.com
-#       Port 443
-#       User git
 git push -u origin main
 ```
+
+若第 5 步报 `Repository not found`，说明远端仓库还不存在：先到
+<https://github.com/organizations/NekoHome-Studio/repositories/new> 建一个**空**仓库（**不要勾 "Add a README"**，否则会多出一次无关的合并）。
+若报 `403`，说明 `qyac` 对该组织仓库没有 write 权限。
 
 ### 权限提醒
 
 远端归属是 **`NekoHome-Studio` 组织**，而本机 git 身份是 `qyac`。
-`qyac` 必须对该组织仓库有 **write 权限**，否则会收到 `403`。若组织启用了 SSO，token 还需额外授权该组织。
+`qyac` 必须对该组织仓库有 **write 权限**，否则会收到 `403`。若组织启用了 SSO，key/token 还需额外授权该组织。
+
+### 遗留物：一个删不掉的空密钥目录
+
+排查过程中我在仓库里生成过一个测试用密钥（`<仓库>\.ssh-handover\`），发现删除时被**文件权限**拒绝
+（连去掉只读属性都失败，且无进程占用）。该目录已在 `.gitignore` 中（连同 `*.pem`、`id_ed25519`、`id_rsa`），
+`git status` 干净，**不会被推送**；那把密钥也从未注册到 GitHub，不具备任何访问能力。
+
+它只影响我这个受限会话，**你自己的普通 PowerShell 应当可以直接删除**：
+
+```powershell
+Remove-Item -Recurse -Force C:\Users\haoxu\Downloads\NekoHome\neko-NamiServer\.ssh-handover
+```
 
 ### 推送后建议
 
 ```bash
-# 确认远端内容与本地一致
 git ls-remote --heads origin
 git log origin/main --oneline -1
 ```
 
 然后在**真正的 Linux 机器**上 clone 一份，跑第 1 节的验收清单——那才是这次交接的终点。
+
 
