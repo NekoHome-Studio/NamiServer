@@ -193,6 +193,34 @@ function jsonResponse(description: string, schema: Json): Json {
   return { description, content: { 'application/json': { schema } } };
 }
 
+/**
+ * A console account. Deliberately has no password field of any kind — the hash
+ * never leaves the database, and there is no endpoint that returns it.
+ */
+const USER_SCHEMA: Json = {
+  type: 'object',
+  properties: {
+    id: { type: 'string' },
+    username: { type: 'string' },
+    isAdmin: { type: 'boolean' },
+    disabled: { type: 'boolean' },
+    createdAt: { type: 'integer' },
+    updatedAt: { type: 'integer' },
+    lastLoginAt: { type: ['integer', 'null'] },
+  },
+  required: ['id', 'username', 'isAdmin', 'disabled'],
+};
+
+/** Shared body of the login / logout / me endpoints. */
+const AUTH_SESSION_SCHEMA: Json = {
+  type: 'object',
+  properties: {
+    object: { type: 'string' },
+    user: { oneOf: [{ $ref: '#/components/schemas/User' }, { type: 'null' }] },
+    expiresAt: { type: 'integer', description: '会话过期时间（epoch ms）。' },
+  },
+};
+
 function errorResponse(description: string): Json {
   return { description, content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } };
 }
@@ -730,6 +758,187 @@ export function buildOpenApiDocument(deps: AppDeps): Json {
           responses: { '200': jsonResponse('Deleted.', { type: 'object' }) },
         },
       },
+      '/admin/api/auth/login': {
+        post: {
+          tags: ['Admin'],
+          summary: '用账号密码登录控制台',
+          description: [
+            '成功时下发 `HttpOnly` + `SameSite=Strict` 的会话 Cookie，浏览器此后的 `/admin/api/*` 请求靠它鉴权——控制台不再把长期凭证放在 `localStorage` 里。',
+            '',
+            '连续失败会按**用户名**与**来源地址**分别计数并锁定（见 `NAMI_LOGIN_MAX_ATTEMPTS` / `NAMI_LOGIN_LOCKOUT_SECONDS`），计数落在数据库里，重启不会清零。',
+            '用户名不存在与密码错误返回完全相同的状态码、消息与耗时，避免被用来枚举账号。',
+          ].join('\n'),
+          security: [],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['username', 'password'],
+                  properties: {
+                    username: { type: 'string' },
+                    password: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': jsonResponse('登录成功，已下发会话 Cookie。', AUTH_SESSION_SCHEMA),
+            '401': errorResponse('用户名或密码不正确。'),
+            '429': errorResponse('失败次数过多，暂时锁定；响应带 `Retry-After`。'),
+          },
+        },
+      },
+      '/admin/api/auth/logout': {
+        post: {
+          tags: ['Admin'],
+          summary: '退出登录',
+          description: '删除服务端的会话记录并清除 Cookie。未登录时也返回 200。',
+          security: [],
+          responses: { '200': jsonResponse('已退出。', { type: 'object' }) },
+        },
+      },
+      '/admin/api/auth/me': {
+        get: {
+          tags: ['Admin'],
+          summary: '当前登录身份',
+          description: [
+            '控制台启动时调用它来决定显示登录页还是仪表盘。',
+            '',
+            '**永远返回 200**：没有会话是正常状态（`authenticated: false`），而不是错误——否则前端无法把「还没登录」和「凭证被拒绝」区分开。',
+          ].join('\n'),
+          security: [],
+          responses: {
+            '200': jsonResponse('登录状态；`keyAuthenticated` 表示调用方用的是 API Key / Admin Token 而非账号。', {
+              type: 'object',
+            }),
+          },
+        },
+      },
+      '/admin/api/auth/password': {
+        post: {
+          tags: ['Admin'],
+          summary: '修改自己的密码',
+          description:
+            '必须以账号（Cookie 会话）调用；API Key / Admin Token 没有对应账号，会返回 403。修改成功后会注销该账号的**全部**会话（包括其它设备），并给当前浏览器换发一个新会话。',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['currentPassword', 'newPassword'],
+                  properties: {
+                    currentPassword: { type: 'string' },
+                    newPassword: { type: 'string', minLength: 10 },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': jsonResponse('已修改，并报告注销掉的会话数。', { type: 'object' }),
+            '400': errorResponse('新密码不符合策略，或与当前密码相同。'),
+            '401': errorResponse('当前密码不正确。'),
+            '403': errorResponse('不是以账号登录的。'),
+          },
+        },
+      },
+      '/admin/api/users': {
+        get: {
+          tags: ['Admin'],
+          summary: '账号列表',
+          responses: { '200': jsonResponse('全部账号（不含任何口令材料）。', { type: 'object' }) },
+        },
+        post: {
+          tags: ['Admin'],
+          summary: '新建账号',
+          description: '用户名会被规范化为小写并全局唯一；`isAdmin` 默认为 true。',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['username', 'password'],
+                  properties: {
+                    username: { type: 'string', description: '3-32 位小写字母、数字、点、下划线或连字符。' },
+                    password: { type: 'string', minLength: 10 },
+                    isAdmin: { type: 'boolean', default: true },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            '201': jsonResponse('已创建。', { $ref: '#/components/schemas/User' }),
+            '409': errorResponse('用户名已存在。'),
+          },
+        },
+      },
+      '/admin/api/users/{id}': {
+        put: {
+          tags: ['Admin'],
+          summary: '停用/启用、降级/提升账号',
+          description:
+            '只接受 `disabled` 与 `isAdmin`。拒绝停用当前登录账号，也拒绝让系统失去最后一个可用的管理员。',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    disabled: { type: 'boolean' },
+                    isAdmin: { type: 'boolean' },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': jsonResponse('已更新。', { $ref: '#/components/schemas/User' }),
+            '409': errorResponse('会移除最后一个可用管理员，或试图停用自己。'),
+          },
+        },
+        delete: {
+          tags: ['Admin'],
+          summary: '删除账号',
+          description: '该账号的全部登录会话随外键级联删除，立即失效。',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': jsonResponse('已删除。', { type: 'object' }),
+            '409': errorResponse('不能删除自己，也不能删掉最后一个可用管理员。'),
+          },
+        },
+      },
+      '/admin/api/users/{id}/password': {
+        post: {
+          tags: ['Admin'],
+          summary: '重置他人密码',
+          description: '需要管理员权限。重置后该账号的所有会话立即失效，必须用新密码重新登录。',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['password'],
+                  properties: { password: { type: 'string', minLength: 10 } },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': jsonResponse('已重置，并报告注销掉的会话数。', { type: 'object' }),
+            '404': errorResponse('账号不存在。'),
+          },
+        },
+      },
       '/admin/api/config': {
         get: {
           tags: ['Admin'],
@@ -829,6 +1038,7 @@ export function buildOpenApiDocument(deps: AppDeps): Json {
         Session: SESSION_SCHEMA,
         Message: MESSAGE_SCHEMA,
         Run: RUN_SCHEMA,
+        User: USER_SCHEMA,
       },
     },
   };

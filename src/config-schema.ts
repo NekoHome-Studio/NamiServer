@@ -123,6 +123,86 @@ export const CONFIG_FIELDS: ConfigFieldSpec[] = [
     restartRequired: RESTART,
   },
 
+  /* ------------------------ 控制台账号密码 ------------------------ */
+  {
+    key: 'NAMI_ADMIN_USER',
+    group: '安全',
+    type: 'string',
+    description:
+      '首次启动时创建的管理员用户名。仅在用户表为空时生效——之后以数据库为准，改这里不会影响已有账号。',
+    read: (c) => c.auth.bootstrapUser,
+    restartRequired: RESTART,
+  },
+  {
+    key: 'NAMI_ADMIN_PASSWORD',
+    group: '安全',
+    type: 'string',
+    description:
+      '首次启动时管理员的初始密码（只在建号那一刻读取，随后以 scrypt 哈希入库，明文不落盘）。留空则随机生成并打印到日志；已有账号时此项被忽略。',
+    secret: true,
+    read: () => null,
+    restartRequired: RESTART,
+  },
+  {
+    key: 'NAMI_SESSION_TTL_HOURS',
+    group: '安全',
+    type: 'int',
+    description: '控制台登录会话的有效期（小时），过期需重新登录。',
+    read: (c) => c.auth.sessionTtlMs / 3_600_000,
+    restartRequired: RESTART,
+  },
+  {
+    key: 'NAMI_SESSION_COOKIE',
+    group: '安全',
+    type: 'string',
+    description: '会话 Cookie 的名称。',
+    read: (c) => c.auth.cookieName,
+    restartRequired: RESTART,
+  },
+  {
+    key: 'NAMI_COOKIE_SECURE',
+    group: '安全',
+    type: 'enum',
+    description:
+      '会话 Cookie 的 Secure 属性。auto 在识别到 HTTPS 时自动加上——Nami 自身不终止 TLS，所以直接暴露在 HTTP 上时用 auto 即可。',
+    options: ['auto', 'always', 'never'],
+    read: (c) => c.auth.cookieSecure,
+    restartRequired: RESTART,
+  },
+  {
+    key: 'NAMI_TRUST_PROXY',
+    group: '安全',
+    type: 'bool',
+    description:
+      '是否信任 X-Forwarded-Proto 来判断请求是 HTTPS。只在你自己的反向代理后面开启；否则任何客户端都能伪造该头。',
+    read: (c) => c.auth.trustProxy,
+    restartRequired: RESTART,
+  },
+  {
+    key: 'NAMI_LOGIN_MAX_ATTEMPTS',
+    group: '安全',
+    type: 'int',
+    description: '连续登录失败多少次后锁定。按用户名与来源地址分别计数。',
+    read: (c) => c.auth.maxAttempts,
+    restartRequired: RESTART,
+  },
+  {
+    key: 'NAMI_LOGIN_LOCKOUT_SECONDS',
+    group: '安全',
+    type: 'int',
+    description: '触发锁定后的冷却时间（秒）。',
+    read: (c) => c.auth.lockoutMs / 1000,
+    restartRequired: RESTART,
+  },
+  {
+    key: 'NAMI_LOGIN_WINDOW_SECONDS',
+    group: '安全',
+    type: 'int',
+    description: '失败计数的滑动窗口（秒）。早于窗口的失败重新开始计数，避免长期累计误锁。',
+    read: (c) => c.auth.attemptWindowMs / 1000,
+    restartRequired: RESTART,
+  },
+
   /* ----------------------------- 日志 ----------------------------- */
   {
     key: 'NAMI_LOG_LEVEL',

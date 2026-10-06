@@ -85,13 +85,18 @@ export const router = createRouter({
 /**
  * Route guard.
  *
- * Only checks that a credential *exists*; it deliberately does not validate it
- * on every navigation. A stale credential is discovered by the first real
- * request, whose 401/403 flows back through the shell so the operator lands on
+ * Authentication now lives in an `HttpOnly` cookie, so the client cannot know
+ * whether it is signed in without asking. `GET /admin/api/auth/me` always
+ * answers 200 and is memoised in the client, so this costs one request per page
+ * load and never throws.
+ *
+ * A stale or expired session is discovered by that probe (or by the first real
+ * request), whose 401/403 flows back through the shell so the operator lands on
  * the login page with a concrete reason instead of a silent redirect.
  */
-router.beforeEach((to) => {
+router.beforeEach(async (to) => {
   if (to.meta.public === true) return true;
+  await api.ensureSession();
   if (!api.authenticated) {
     return { name: 'login', query: to.fullPath === '/' ? {} : { redirect: to.fullPath } };
   }

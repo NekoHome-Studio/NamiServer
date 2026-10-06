@@ -42,24 +42,37 @@ function dismissToast(id: number): void {
 const authError = ref<string>('');
 
 export const auth = {
+  /** Only used by the API-key fallback; the session lives in an HttpOnly cookie. */
   credential: api.credential,
+  authState: api.authState,
   authenticated: computed(() => api.authenticated),
+  currentUser: computed(() => api.currentUser),
+  /** A stable label for the account chip. */
+  displayName: computed(() => api.currentUser?.username ?? (api.credential.value !== '' ? 'API Key' : '未登录')),
   error: readonly(authError),
 
-  signIn(credential: string): void {
+  /** Accepts an API key as a fallback when no account is available. */
+  signInWithKey(credential: string): void {
     authError.value = '';
     api.setCredential(credential);
   },
 
-  signOut(reason?: string): void {
-    api.clearCredential();
+  async signOut(reason?: string): Promise<void> {
     authError.value = reason ?? '';
+    await api.logout();
   },
 
   /** Records a rejected credential and clears it, so the guard sends us to login. */
   reject(reason: string): void {
     authError.value = reason;
     api.clearCredential();
+    api.forgetSession();
+  },
+
+  /** Re-reads the session from the server, e.g. after signing in. */
+  async refresh(): Promise<void> {
+    api.forgetSession();
+    await api.ensureSession();
   },
 };
 

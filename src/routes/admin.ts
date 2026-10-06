@@ -26,6 +26,19 @@ function redactedConfig(deps: AppDeps): Record<string, unknown> {
     dbPath: config.dbPath,
     apiKeys: { count: config.apiKeys.length, generated: config.generatedKey !== null },
     adminToken: { configured: config.adminToken !== null },
+    auth: {
+      bootstrapUser: config.auth.bootstrapUser,
+      // Never the password itself — only whether the operator supplied one, so
+      // the config page can say "will seed a random password" versus "will use it".
+      bootstrapPassword: { configured: config.auth.bootstrapPassword !== '' },
+      sessionTtlHours: config.auth.sessionTtlMs / 3_600_000,
+      cookieName: config.auth.cookieName,
+      cookieSecure: config.auth.cookieSecure,
+      trustProxy: config.auth.trustProxy,
+      maxAttempts: config.auth.maxAttempts,
+      lockoutMs: config.auth.lockoutMs,
+      attemptWindowMs: config.auth.attemptWindowMs,
+    },
     agent: { ...config.agent },
     llm: {
       provider: config.llm.provider,

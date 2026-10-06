@@ -10,7 +10,7 @@
 - 🛠️ **带沙箱的工具调用循环**：JSON Schema 参数校验、超时、结果截断、危险工具默认关闭
 - 🔌 **三通道接入**：OpenAI 兼容 REST、原生 SSE 事件流、WebSocket 双向控制
 - 💾 **SQLite 会话持久化**：会话、消息、运行记录、工具调用、会话级 KV
-- 🔐 **API Key 鉴权 + 令牌桶限流**，密钥常量时间比较
+- 🔐 **控制台账号密码登录**：账号存 SQLite、密码 scrypt 哈希、登录态走 HttpOnly Cookie；连续失败按用户名与来源地址分别锁定。程序化调用继续用 **API Key**（常量时间比较 + 令牌桶限流）。
 - 🖥️ **Web 管理面板** + **OpenAPI 3.1 规范**（`/openapi.json`、`/docs`）
 - 📦 **运行时零依赖**：`dependencies` 为 `{}`，无构建步骤，直接 `node src/index.ts`
 - 🐳 **Docker 一键部署**：非 root 运行，`/app/data` 数据卷（**本项目未使用，镜像未构建/未验证**）
@@ -25,7 +25,17 @@
 
 ## WebUI 控制台
 
-浏览器打开 **`http://<主机>:8787/admin`**，输入 `NAMI_API_KEYS` 中的任意一个（或 `NAMI_ADMIN_TOKEN`）即可。
+浏览器打开 **`http://<主机>:8787/admin`**，用**账号密码**登录。
+
+首次启动且数据库里还没有账号时，Nami 会自动建一个：`NAMI_ADMIN_USER`（默认 `admin`）配 `NAMI_ADMIN_PASSWORD`；没设密码就随机生成一把并**只在启动横幅里打印一次**。忘了密码或想加账号，在服务器上执行：
+
+```bash
+npm run passwd -- --list                        # 看看有哪些账号
+npm run passwd -- --user admin --generate       # 重置密码（打印一次）
+npm run passwd -- --add alice --password '...'  # 新建普通账号（加 --admin 建管理员）
+```
+
+登录态保存在 **HttpOnly Cookie** 里（`SameSite=Strict`，页面脚本读不到），所以控制台不再把任何长期凭证放进 `localStorage`。没有账号时也可以在登录页切到「API Key」用 `NAMI_API_KEYS` 进入；`/v1/*` 始终可以用 API Key。
 
 十个页面：**登录 · 仪表盘 · 对话 · 会话 · 模型 · 工具 · OneBot/QQ · 配置 · 日志 · API 文档**。
 
@@ -854,13 +864,13 @@ npm run webui:dev         # 开发服务器（:5199，自动代理到本机 8787
 npm run webui:build       # 构建并输出到 src/web/app
 ```
 
-冒烟测试共 **482 项断言**，覆盖全部通道与安全边界。其中：
+冒烟测试共 **541 项断言**，覆盖全部通道与安全边界。其中：
 
 - **Ollama** 部分跑在测试内启动的**假 Ollama 守护进程**上，因此不需要真装 Ollama 也能验证：`/api/tags` 发现、NDJSON 流式解析（并故意把一行 JSON 拆到两次 TCP 写入以测试分片缓冲）、原生 tool calling、`num_ctx` / `keep_alive` 透传、别名与白名单策略、以及 Ollama 不可用时的降级行为。
 - **OneBot** 部分跑在测试内启动的**假 OneBot 实现**上，覆盖：入站过滤的每一条分支（@/前缀/全部/闭麦、私聊视为对机器人说话、自我循环、群与用户白名单、图片无文字）、上报密钥校验、`204` 先于模型返回、回答经真实 `at` 消息段回发、长回答分片、出站工具的白名单拒绝、以及管理端同步模拟与手动发送。
 - **外部集成契约**部分把 AstrBot 插件依赖的调用约定钉死：带冒号的作用域会话 id 能原样落库与取回、URL 编码后的会话删除、`/readyz` 的 `checks` 字段齐全、以及插件据此给建议的错误码。
 
-加上 AstrBot 插件自己的 **448 项**离线自检，这个仓库里共有 **930 项**可复现的断言。
+加上 AstrBot 插件自己的 **448 项**离线自检，这个仓库里共有 **989 项**可复现的断言。
 
 关于 `npm install`：**只有 `npm run typecheck`（和 `npm test` 的类型检查部分）需要它**，因为 `typescript` 与 `@types/node` 是 devDependencies。日常 `npm start` / `npm run dev` / `npm run smoke` 都不需要 `node_modules`，也不会产生 `dist/` 目录 —— 整个项目没有构建产物。
 

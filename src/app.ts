@@ -30,6 +30,25 @@ export interface AppDeps {
   onebotClient: OneBotClient;
   /** Inbound QQ bridge, also the source of the connector's counters. */
   onebotBridge: OneBotBridge;
+  /**
+   * Result of the first-boot console-account seeding.
+   *
+   * Carried here so the startup banner can print a generated password exactly
+   * once. The plain-text value never reaches the database, the log buffer, or
+   * disk — the banner writes straight to stdout.
+   */
+  consoleAccount?: ConsoleAccountSeed;
   /** Epoch ms when the process finished booting. */
   startedAt: number;
+}
+
+/** What the first-boot console-account seeding did. */
+export interface ConsoleAccountSeed {
+  /** True when this boot created the account (false when one already existed). */
+  created: boolean;
+  username: string;
+  /** Non-null only when Nami had to invent a password; shown once, never stored. */
+  generatedPassword: string | null;
+  /** Set when an operator-supplied password was rejected by the policy. */
+  rejectedReason: string | null;
 }

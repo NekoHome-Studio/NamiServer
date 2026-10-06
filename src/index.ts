@@ -7,6 +7,7 @@
  */
 
 import type { AppDeps } from './app.ts';
+import { seedConsoleAccount } from './auth/bootstrap.ts';
 import { loadConfig, type Config } from './config.ts';
 import { createProvider, ModelRouter, OllamaProvider } from './llm/index.ts';
 import { createLogger, type Logger } from './logger.ts';
@@ -59,6 +60,10 @@ export async function bootstrap(config: Config): Promise<BootstrappedServer> {
   if (reaped > 0) {
     log.warn('marked runs interrupted by a previous shutdown as failed', { count: reaped });
   }
+
+  // Guarantees the console is reachable: either the operator's account, or one
+  // whose generated password is printed once in the banner.
+  const consoleAccount = await seedConsoleAccount(config, store, log);
 
   const provider = createProvider(config, log.child({ scope: 'llm' }));
   const metrics = new Metrics();
@@ -172,6 +177,7 @@ export async function bootstrap(config: Config): Promise<BootstrappedServer> {
     metrics,
     onebotClient,
     onebotBridge,
+    consoleAccount,
     startedAt: Date.now(),
   };
 
@@ -353,6 +359,22 @@ function printBanner(config: Config, deps: AppDeps): void {
       `  ${yellow}⚠  NAMI_API_KEYS was not set, so a key was generated for this run:${reset}`,
       `     ${bold}${config.generatedKey}${reset}`,
       `  ${dim}   It changes on every restart. Set NAMI_API_KEYS to keep it stable.${reset}`,
+    );
+  }
+
+  const account = deps.consoleAccount;
+  if (account?.created === true && account.generatedPassword !== null) {
+    lines.push(
+      '',
+      `  ${yellow}⚠  No console account existed, so one was created for this run:${reset}`,
+      `     ${bold}${account.username}${reset} / ${bold}${account.generatedPassword}${reset}`,
+      `  ${dim}   Shown once and never stored in clear text. Log in at ${reset}${cyan}${base}/admin${reset}${dim} and change it,${reset}`,
+      `  ${dim}   or set NAMI_ADMIN_PASSWORD before the first start to choose your own.${reset}`,
+    );
+  } else if (account?.created === true) {
+    lines.push(
+      '',
+      `  ${dim}Console account created from NAMI_ADMIN_USER/NAMI_ADMIN_PASSWORD: ${reset}${bold}${account.username}${reset}`,
     );
   }
 

@@ -421,37 +421,107 @@ export class ApiError extends Error {
 
 const STORAGE_KEY = 'nami.credential';
 
+/** Who the server says we are. Mirrors `GET /admin/api/auth/me`. */
+export interface SessionState {
+  authenticated: boolean;
+  user: PublicUser | null;
+  via: string;
+  /** True when the caller is an API key / admin token rather than an account. */
+  keyAuthenticated: boolean;
+  users: number;
+}
+
+export interface PublicUser {
+  id: string;
+  username: string;
+  isAdmin: boolean;
+  disabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+  lastLoginAt: number | null;
+}
+
 export class NamiClient {
-  /** Reactive so the shell can react to sign-in/out. */
+  /**
+   * Fallback API key, held **in memory only**.
+   *
+   * The console's normal credential is the session cookie, which JavaScript
+   * cannot read — that is the point of `HttpOnly`. This field only exists so an
+   * operator can still get in with a key when, say, no account exists yet. It is
+   * deliberately not persisted: a long-lived key in `localStorage` is exactly
+   * what the account system was added to remove.
+   */
   readonly credential: Ref<string> = ref('');
 
+  /** Server-confirmed identity; null until the first probe answers. */
+  readonly authState: Ref<SessionState | null> = ref(null);
+
+  /** Memoised first probe so the router guard and the shell share one request. */
+  private probe: Promise<SessionState> | null = null;
+
   constructor() {
+    /*
+     * Remove the credential older builds kept in `localStorage`.
+     *
+     * It is a plain-text API key sitting in a place any script on the origin can
+     * read; the account system exists partly so it does not have to live there.
+     * Clearing it on sight means an upgrade does not leave one behind.
+     */
     try {
-      this.credential.value = localStorage.getItem(STORAGE_KEY) ?? '';
-    } catch {
-      // Private-mode or storage disabled: the console still works, it just
-      // will not remember the credential across reloads.
-      this.credential.value = '';
-    }
-  }
-
-  get authenticated(): boolean {
-    return this.credential.value.trim() !== '';
-  }
-
-  setCredential(value: string): void {
-    const trimmed = value.trim();
-    this.credential.value = trimmed;
-    try {
-      if (trimmed === '') localStorage.removeItem(STORAGE_KEY);
-      else localStorage.setItem(STORAGE_KEY, trimmed);
+      localStorage.removeItem(STORAGE_KEY);
     } catch {
       /* storage unavailable */
     }
   }
 
+  /** True once we have an answer, so the guard can wait for a real decision. */
+  get authenticated(): boolean {
+    return this.authState.value?.authenticated === true || this.credential.value.trim() !== '';
+  }
+
+  /** True when signed in with an account (as opposed to a key). */
+  get signedInWithAccount(): boolean {
+    return this.authState.value?.authenticated === true;
+  }
+
+  get currentUser(): PublicUser | null {
+    return this.authState.value?.user ?? null;
+  }
+
+  setCredential(value: string): void {
+    this.credential.value = value.trim();
+    // A key changes the answer, so the cached probe is no longer trustworthy.
+    this.probe = null;
+  }
+
   clearCredential(): void {
-    this.setCredential('');
+    this.credential.value = '';
+    this.probe = null;
+  }
+
+  /**
+   * Resolves the current session, asking the server at most once.
+   *
+   * `GET /admin/api/auth/me` always answers 200, so a signed-out visitor is a
+   * normal result rather than an error path.
+   */
+  async ensureSession(): Promise<SessionState> {
+    if (this.authState.value !== null) return this.authState.value;
+    this.probe ??= this.me().catch(() => ({
+      authenticated: false,
+      user: null,
+      via: 'none',
+      keyAuthenticated: false,
+      users: 0,
+    }));
+    this.authState.value = await this.probe;
+    return this.authState.value;
+  }
+
+  /** Forgets the cached identity; the next guard check re-probes. */
+  forgetSession(): void {
+    this.authState.value = null;
+    this.probe = null;
   }
 
   private headers(extra: Record<string, string> = {}): Record<string, string> {
@@ -515,6 +585,77 @@ export class NamiClient {
   }
 
   /* ---------------------------- endpoints ---------------------------- */
+
+  /* --- console accounts --- */
+
+  me(): Promise<SessionState> {
+    return this.get('/admin/api/auth/me');
+  }
+
+  /**
+   * Signs in with an account.
+   *
+   * The response also sets the session cookie; nothing needs to be stored here.
+   */
+  async login(username: string, password: string): Promise<SessionState> {
+    const result = await this.json<{ user: PublicUser; expiresAt: number }>(
+      '/admin/api/auth/login',
+      'POST',
+      { username, password },
+    );
+    // Any API-key fallback is now redundant, and keeping it would mask a broken
+    // session with a working key.
+    this.clearCredential();
+    this.forgetSession();
+    this.authState.value = await this.me();
+    return this.authState.value ?? {
+      authenticated: true,
+      user: result.user,
+      via: 'session',
+      keyAuthenticated: false,
+      users: 0,
+    };
+  }
+
+  async logout(): Promise<void> {
+    try {
+      await this.json('/admin/api/auth/logout', 'POST', {});
+    } finally {
+      this.clearCredential();
+      this.forgetSession();
+      this.authState.value = {
+        authenticated: false,
+        user: null,
+        via: 'none',
+        keyAuthenticated: false,
+        users: 0,
+      };
+    }
+  }
+
+  changePassword(currentPassword: string, newPassword: string): Promise<{ revokedSessions: number }> {
+    return this.json('/admin/api/auth/password', 'POST', { currentPassword, newPassword });
+  }
+
+  users(): Promise<{ data: PublicUser[]; sessions: number; caller: string | null }> {
+    return this.get('/admin/api/users');
+  }
+
+  createUser(body: { username: string; password: string; isAdmin: boolean }): Promise<{ user: PublicUser }> {
+    return this.json('/admin/api/users', 'POST', body);
+  }
+
+  updateUser(id: string, body: { disabled?: boolean; isAdmin?: boolean }): Promise<{ user: PublicUser }> {
+    return this.json(`/admin/api/users/${encodeURIComponent(id)}`, 'PUT', body);
+  }
+
+  deleteUser(id: string): Promise<{ deleted: boolean }> {
+    return this.request(`/admin/api/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  resetUserPassword(id: string, password: string): Promise<{ revokedSessions: number }> {
+    return this.json(`/admin/api/users/${encodeURIComponent(id)}/password`, 'POST', { password });
+  }
 
   health(): Promise<HealthResponse> {
     return this.get('/healthz');

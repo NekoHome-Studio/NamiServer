@@ -86,14 +86,22 @@
       <v-menu location="bottom end">
         <template #activator="{ props }">
           <v-btn v-bind="props" variant="text" prepend-icon="mdiAccountCircle" class="text-none">
-            <span class="d-none d-sm-inline">{{ maskedCredential }}</span>
+            <span class="d-none d-sm-inline">{{ auth.displayName.value }}</span>
           </v-btn>
         </template>
         <v-list density="comfortable" min-width="240">
           <v-list-item
-            prepend-icon="mdiKeyOutline"
-            title="更换凭证"
-            @click="changeCredential"
+            v-if="auth.currentUser.value"
+            :title="auth.currentUser.value.username"
+            :subtitle="auth.currentUser.value.isAdmin ? '管理员' : '普通用户'"
+            prepend-icon="mdiAccountOutline"
+          />
+          <v-divider v-if="auth.currentUser.value" />
+          <v-list-item
+            v-if="auth.currentUser.value"
+            prepend-icon="mdiLockReset"
+            title="修改密码"
+            @click="passwordDialog = true"
           />
           <v-list-item
             prepend-icon="mdiOpenInNew"
@@ -134,16 +142,55 @@
         </div>
       </v-alert>
     </div>
+
+    <!-- Change your own password. Revokes every other session, so it says so. -->
+    <v-dialog v-model="passwordDialog" max-width="520">
+      <v-card title="修改密码">
+        <v-card-text>
+          <v-alert type="info" variant="tonal" density="comfortable" class="mb-4">
+            <div class="text-body-2">
+              修改成功后，该账号在<strong>其它设备上的登录会全部失效</strong>，当前浏览器会自动续期。
+            </div>
+          </v-alert>
+          <v-text-field
+            v-model="currentPassword"
+            label="当前密码"
+            type="password"
+            autocomplete="current-password"
+          />
+          <v-text-field
+            v-model="newPassword"
+            label="新密码（至少 10 个字符）"
+            type="password"
+            autocomplete="new-password"
+          />
+          <v-text-field
+            v-model="confirmPassword"
+            label="再输一次新密码"
+            type="password"
+            autocomplete="new-password"
+          />
+          <v-alert v-if="passwordError" type="error" variant="tonal" density="comfortable">
+            <div class="text-body-2">{{ passwordError }}</div>
+          </v-alert>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="closePasswordDialog">取消</v-btn>
+          <v-btn color="primary" :loading="passwordSaving" @click="submitPassword">保存</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
   </v-app>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useTheme } from 'vuetify';
 import { api } from '@/api/client';
 import type { HealthResponse, OverviewResponse } from '@/api/client';
-import { auth, formatUptime, shell } from '@/composables/useShell';
+import { auth, describeError, formatUptime, shell } from '@/composables/useShell';
 
 const route = useRoute();
 const router = useRouter();
@@ -174,13 +221,41 @@ const navItems = computed(() =>
     })),
 );
 
-/** Never show the credential itself; just enough to tell which one is loaded. */
-const maskedCredential = computed(() => {
-  const value = api.credential.value;
-  if (value === '') return '未登录';
-  if (value.length <= 8) return `${value.slice(0, 2)}…`;
-  return `${value.slice(0, 6)}…${value.slice(-3)}`;
-});
+const passwordDialog = ref(false);
+const currentPassword = ref('');
+const newPassword = ref('');
+const confirmPassword = ref('');
+const passwordError = ref('');
+const passwordSaving = ref(false);
+
+function closePasswordDialog(): void {
+  passwordDialog.value = false;
+  currentPassword.value = '';
+  newPassword.value = '';
+  confirmPassword.value = '';
+  passwordError.value = '';
+}
+
+async function submitPassword(): Promise<void> {
+  passwordError.value = '';
+  if (newPassword.value !== confirmPassword.value) {
+    passwordError.value = '两次输入的新密码不一致。';
+    return;
+  }
+  passwordSaving.value = true;
+  try {
+    const result = await api.changePassword(currentPassword.value, newPassword.value);
+    closePasswordDialog();
+    shell.success(
+      '密码已修改',
+      result.revokedSessions > 0 ? `已注销其它 ${result.revokedSessions} 个会话` : undefined,
+    );
+  } catch (error) {
+    passwordError.value = describeError(error);
+  } finally {
+    passwordSaving.value = false;
+  }
+}
 
 function toggleTheme(): void {
   theme.global.name.value = theme.global.name.value === 'namiDark' ? 'namiLight' : 'namiDark';
@@ -197,17 +272,12 @@ function refreshAll(): void {
   shell.info('已请求刷新');
 }
 
-function changeCredential(): void {
-  void router.push({ name: 'login', query: { redirect: route.fullPath } });
-}
-
 function openDocs(): void {
   void router.push({ name: 'api' });
 }
 
 function signOut(): void {
-  auth.signOut();
-  void router.push({ name: 'login' });
+  void auth.signOut().finally(() => router.push({ name: 'login' }));
 }
 
 /** Lightweight poll: the shell only needs enough to colour the status dot. */
@@ -236,6 +306,18 @@ onMounted(() => {
   void loadShellData();
   healthTimer = window.setInterval(() => void loadShellData(), 15_000);
 });
+
+/*
+ * Signing in happens *after* this component mounts — the login route renders
+ * inside the same `v-app` — so without this the status footer would read
+ * "服务不可达" until the next 15-second tick.
+ */
+watch(
+  () => auth.authState.value?.authenticated === true,
+  (signedIn) => {
+    if (signedIn) void loadShellData();
+  },
+);
 
 onUnmounted(() => {
   if (healthTimer !== undefined) window.clearInterval(healthTimer);

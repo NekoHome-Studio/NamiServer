@@ -184,3 +184,37 @@ podman/buildah/nerdctl/kaniko → 全部不存在
 
 `①②③④` 在真实 Linux 上**全部通过**，代码本身在 Linux 上是好的；补测暴露的两个边界缺陷（关闭钩子、静态资源）**都已修复并复验**，且重新构建证明**提交的 WebUI 产物是可复现的**。
 **Docker 已决定不使用**，故不再是缺口；本机部署路径（`NAMI_API_KEYS=<key> npm start`）已验证可用。
+
+---
+
+## 附：同日的后续变更（本节晚于上面各节）
+
+上面记录的是当次验收的**原始结果**，数字保留不改。之后同一天又做了两件事，结论如下。
+
+### 1. 用真实浏览器打开控制台，修掉 3 个缺陷
+
+装上 headless Chromium（本机原本没有浏览器、没有 Java，Chrome 从 npmmirror 取，缺的 3 个 X11 库用 `apt-get download` + `dpkg-deb -x` 非 root 补上）后打开 `/admin`：
+
+| 缺陷 | 现象 | 根因 |
+| --- | --- | --- |
+| **白屏（致命）** | `#app` 子节点 0、页面全白、控制台 3 个脚本 + 1 个样式表全被 CSP 拦截 | `src/server.ts` 给自包含页面与 SPA 共用同一套 CSP：`script-src 'unsafe-inline'` 没有 `'self'`，而 SPA 的 JS/CSS 是 `/admin/assets/` 下的外部文件。请求全是 200，curl 与状态码断言都看不见 |
+| **所有 MDI 图标空白** | `<path d="mdiViewDashboardOutline">` | Vuetify 只在名字以 `$` 开头时才查 `aliases`（`lib/composables/icons.js`），裸名字直送 SVG 渲染器；生成的路径表放在 `aliases` 里，因此 399 处引用**从未生效** |
+| **favicon 404** | 浏览器请求 `/favicon.svg` | 产物里是相对路径 `./favicon.svg`，而页面地址是 `/admin`（无结尾斜杠），相对路径解析到站点根 |
+
+修法：CSP 拆成 `inlineHtmlHeaders()` / `spaHtmlHeaders()` 两套；图标改为自定义 icon set（`defaultSet: 'nami'`）在渲染前翻译名字，并给未登记的名字加 `console.warn`；favicon 改绝对路径交由 Vite 补 base。
+
+修复后：登录页正常渲染、10 个页面逐个巡检零报错、对话页真实发消息并渲染出工具调用卡片。冒烟测试补了 9 项 CSP 断言（不再只查「头存在」，而是查 `script-src` 含 `'self'`、classic 与 SPA 两套必须不同，并实际取回入口脚本确认 MIME）。
+
+### 2. 新增控制台账号密码登录
+
+账号存 SQLite（`users` / `auth_sessions` / `login_attempts`），密码 scrypt 哈希，登录态走 `HttpOnly` + `SameSite=Strict` Cookie；API Key 保留给 `/v1/*` 与程序化调用。新增 `npm run passwd` 用于查看/新建/重置/停用账号。
+
+实现中自己踩到并修掉的坑，一并记录：
+
+- `/me` 一开始被设为「完全免鉴权」，于是服务器**根本不解析会话**，带 Cookie 也永远报未登录 → 增加 `optional` 鉴权档位（解析但不强制）。
+- `/v1/*` 最初只认 API Key，导致账号登录的用户**发不出消息**（`POST /v1/agent/run` 就在 `/v1` 下）→ 让 `/v1/*` 也接受会话 Cookie（SameSite=Strict，无 CSRF 面）。
+- 登录后侧栏一直显示「服务不可达」：shell 的健康轮询只在挂载时跑一次，而那时还在登录页 → 监听登录态变化后立即刷新。
+
+### 3. 数字变化
+
+新增测试后：smoke **541** 项断言（原 482）、可移植性 **628** 项检查（原 574）、加上插件自检 448 项共 **989** 项。`npm test` 退出码 0。

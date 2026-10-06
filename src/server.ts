@@ -13,12 +13,15 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
 import type { AppDeps } from './app.ts';
 import { asObject, parseJsonBody, readRawBody } from './http/body.ts';
-import { authenticate, authenticateAdmin, maskKey } from './http/auth.ts';
+import { authenticate, authenticateAdmin, authenticateOptional, maskKey } from './http/auth.ts';
+import type { SessionResolution } from './http/auth.ts';
 import { HttpError, applyCors, sendError, sendJson, sendText } from './http/response.ts';
 import { Router } from './http/router.ts';
 import type { AuthInfo, RequestContext } from './http/types.ts';
+import { hashSessionToken } from './auth/tokens.ts';
 import { registerAdminRoutes } from './routes/admin.ts';
 import { registerAgentRoutes } from './routes/agent.ts';
+import { registerAuthRoutes } from './routes/auth.ts';
 import { registerConfigRoutes } from './routes/config.ts';
 import { registerHealthRoutes } from './routes/health.ts';
 import { registerLogRoutes } from './routes/logs.ts';
@@ -40,9 +43,14 @@ export interface NamiServer {
 
 const ANONYMOUS: AuthInfo = { key: 'anonymous', via: 'none', isAdmin: false };
 
-function needsAuth(pathname: string): 'api' | 'admin' | null {
+function needsAuth(pathname: string): 'api' | 'admin' | 'optional' | null {
   if (pathname === '/v1' || pathname.startsWith('/v1/')) return 'api';
-  if (pathname.startsWith('/admin/api')) return 'admin';
+  if (pathname.startsWith('/admin/api')) {
+    // The login endpoints cannot require a session — obtaining one is the point.
+    // They are not simply public either: `/me` and `logout` must still *resolve*
+    // a session when one is present, so they use the optional tier.
+    return PUBLIC_ADMIN_PATHS.has(pathname) ? 'optional' : 'admin';
+  }
   return null;
 }
 
@@ -51,6 +59,13 @@ function needsAuth(pathname: string): 'api' | 'admin' | null {
  * request headers — so these, and only these, also accept `?key=`.
  */
 const QUERY_AUTH_ADMIN_PATHS = new Set(['/admin/api/logs/stream']);
+
+/** Reachable without any credential, by definition. */
+const PUBLIC_ADMIN_PATHS = new Set([
+  '/admin/api/auth/login',
+  '/admin/api/auth/logout',
+  '/admin/api/auth/me',
+]);
 
 export function createNamiServer(deps: AppDeps): NamiServer {
   const { config, log, metrics, limiter } = deps;
@@ -64,7 +79,32 @@ export function createNamiServer(deps: AppDeps): NamiServer {
   registerOneBotRoutes(router, deps);
   registerLogRoutes(router, deps);
   registerConfigRoutes(router, deps);
+  // Registered before the other admin routes so `/admin/api/auth/*` can never be
+  // shadowed by a parameterised pattern.
+  registerAuthRoutes(router, deps);
   registerAdminRoutes(router, deps, () => router.describe());
+
+  /**
+   * Turns a session cookie into an authenticated caller.
+   *
+   * The store owns expiry and the disabled flag, so a session that outlives its
+   * TTL or belongs to an account that was switched off is rejected here without
+   * this file having to remember either rule. `last_seen_at` slides on use.
+   */
+  const resolveSession = (token: string): SessionResolution | null => {
+    const hash = hashSessionToken(token);
+    const found = deps.store.findAuthSession(hash);
+    if (!found) return null;
+    deps.store.touchAuthSession(hash);
+    return {
+      user: {
+        id: found.user.id,
+        username: found.user.username,
+        isAdmin: found.user.isAdmin,
+      },
+      sessionTokenHash: hash,
+    };
+  };
 
   // Pages and the machine-readable spec are all unauthenticated: they contain no
   // data, and API consumers need the contract before they have a key.
@@ -246,16 +286,25 @@ export function createNamiServer(deps: AppDeps): NamiServer {
         return;
       }
 
+      const authOptions = {
+        allowQuery: QUERY_AUTH_ADMIN_PATHS.has(url.pathname),
+        resolveSession,
+        cookieName: config.auth.cookieName,
+      };
       const authKind = needsAuth(url.pathname);
       if (authKind === 'api') {
-        auth = authenticate(config, req, url);
+        auth = authenticate(config, req, url, authOptions);
       } else if (authKind === 'admin') {
-        auth = authenticateAdmin(config, req, url, {
-          allowQuery: QUERY_AUTH_ADMIN_PATHS.has(url.pathname),
-        });
+        auth = authenticateAdmin(config, req, url, authOptions);
+      } else if (authKind === 'optional') {
+        // Login endpoints: resolve a session when there is one, but never fail.
+        auth = authenticateOptional(config, req, url, authOptions);
       }
 
-      if (authKind !== null && limiter.enabled) {
+      // Unauthenticated calls to the optional tier are not rate-limited: the
+      // console polls `/me`, and charging those to the anonymous bucket would
+      // throttle a signed-out browser for no benefit.
+      if ((authKind === 'api' || authKind === 'admin') && limiter.enabled) {
         const decision = limiter.check(auth.key);
         res.setHeader('x-ratelimit-limit', String(decision.limit));
         res.setHeader('x-ratelimit-remaining', String(decision.remaining));

@@ -24,17 +24,17 @@ import { mdiAccessPoint, mdiAccountCheckOutline, mdiAccountCircle, mdiAccountGro
    mdiFlaskOutline, mdiFormatLetterCase, mdiFormatListBulleted, mdiHelpCircleOutline,
    mdiHistory, mdiHomeOutline, mdiInboxArrowDownOutline, mdiInboxOutline, mdiInformationOutline,
    mdiKeyOutline, mdiLanConnect, mdiLanDisconnect, mdiLightningBoltOutline, mdiLinkVariant,
-   mdiLoading, mdiLoginVariant, mdiLogout, mdiMagnify, mdiMagnifyClose, mdiMapSearchOutline,
-   mdiMessageTextOutline, mdiMinusCircleOutline, mdiOpenInNew, mdiPauseCircleOutline, mdiPencil,
-   mdiPencilOutline, mdiPlayCircleOutline, mdiPlus, mdiProgressClock, mdiQqchat, mdiRadar,
-   mdiRefresh, mdiRobotHappyOutline, mdiSend, mdiSendOutline, mdiSendVariantOutline,
-   mdiServerOutline, mdiShieldAlertOutline, mdiShieldCheckOutline, mdiShieldKeyOutline,
-   mdiSortClockDescendingOutline, mdiStarOutline, mdiStop, mdiSwapHorizontal,
-   mdiTextBoxSearchOutline, mdiTimerSand, mdiTimerSandComplete, mdiToolboxOutline,
-   mdiTuneVariant, mdiUndoVariant, mdiViewDashboardOutline, mdiWeatherNight, mdiWeatherSunny,
-   mdiWrenchOutline, } from '@mdi/js';
+   mdiLoading, mdiLockReset, mdiLoginVariant, mdiLogout, mdiMagnify, mdiMagnifyClose,
+   mdiMapSearchOutline, mdiMessageTextOutline, mdiMinusCircleOutline, mdiOpenInNew,
+   mdiPauseCircleOutline, mdiPencil, mdiPencilOutline, mdiPlayCircleOutline, mdiPlus,
+   mdiProgressClock, mdiQqchat, mdiRadar, mdiRefresh, mdiRobotHappyOutline, mdiSend,
+   mdiSendOutline, mdiSendVariantOutline, mdiServerOutline, mdiShieldAlertOutline,
+   mdiShieldCheckOutline, mdiShieldKeyOutline, mdiSortClockDescendingOutline, mdiStarOutline,
+   mdiStop, mdiSwapHorizontal, mdiTextBoxSearchOutline, mdiTimerSand, mdiTimerSandComplete,
+   mdiToolboxOutline, mdiTuneVariant, mdiUndoVariant, mdiViewDashboardOutline, mdiWeatherNight,
+   mdiWeatherSunny, mdiWrenchOutline, } from '@mdi/js';
 
-/** 93 icons currently referenced by the WebUI. */
+/** 94 icons currently referenced by the WebUI. */
 export const namiIconAliases: Record<string, string> = {
   mdiAccessPoint,
   mdiAccountCheckOutline,
@@ -90,6 +90,7 @@ export const namiIconAliases: Record<string, string> = {
   mdiLightningBoltOutline,
   mdiLinkVariant,
   mdiLoading,
+  mdiLockReset,
   mdiLoginVariant,
   mdiLogout,
   mdiMagnify,

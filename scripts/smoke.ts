@@ -9,6 +9,7 @@
  * Run with: npm run smoke
  */
 
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, isAbsolute, join, sep } from 'node:path';
@@ -2948,6 +2949,361 @@ async function testWebUiBundle(main: Fixture): Promise<void> {
   equal('缺失产物 → 404（不返回外壳）', unknownAsset.status, 404);
 }
 
+/**
+ * Console account authentication.
+ *
+ * The assertions that matter most are the ones that would regress silently:
+ * that the session **cookie** is what authenticates the console, that a wrong
+ * password is indistinguishable from an unknown user, that only the *hash* of a
+ * session token is stored, and that removing the last administrator is refused
+ * from every direction.
+ */
+async function testConsoleAccounts(): Promise<void> {
+  section('控制台账号与会话鉴权');
+
+  const password = 'first-password-123';
+  const fixture = await startServer('auth', {
+    NAMI_ADMIN_USER: 'Admin',
+    NAMI_ADMIN_PASSWORD: password,
+    NAMI_LOGIN_MAX_ATTEMPTS: '3',
+    NAMI_LOGIN_LOCKOUT_SECONDS: '60',
+  });
+
+  /* ------------------------------ seeding ------------------------------ */
+
+  const seeded = fixture.app.deps.store.listUsers();
+  equal('首次启动播种了 1 个账号', seeded.length, 1);
+  equal('用户名被规范化为小写', seeded[0]?.username, 'admin');
+  equal('播种账号是管理员', seeded[0]?.isAdmin, true);
+  check(
+    '口令以 scrypt 哈希入库（无明文）',
+    (seeded[0]?.passwordHash ?? '').startsWith('scrypt$') &&
+      !(seeded[0]?.passwordHash ?? '').includes(password),
+  );
+  check(
+    '环境变量提供了密码时不再随机生成',
+    fixture.app.deps.consoleAccount?.generatedPassword === null,
+  );
+
+  /* ------------------------------- login ------------------------------- */
+
+  const before = await http(fixture, 'GET', '/admin/api/auth/me', { key: null });
+  equal('/me 未登录 → 200（不是 401）', before.status, 200);
+  equal(
+    '/me 未登录 authenticated=false',
+    (before.json as { authenticated?: boolean })?.authenticated,
+    false,
+  );
+
+  const wrong = await http(fixture, 'POST', '/admin/api/auth/login', {
+    key: null,
+    json: { username: 'admin', password: 'not-the-password' },
+  });
+  const unknown = await http(fixture, 'POST', '/admin/api/auth/login', {
+    key: null,
+    json: { username: 'nobody', password: 'not-the-password' },
+  });
+  equal('错误密码 → 401', wrong.status, 401);
+  equal('不存在的用户 → 401', unknown.status, 401);
+  equal(
+    '未知用户与错误密码的消息一致（无法枚举账号）',
+    (unknown.json as { error?: { message?: string } })?.error?.message,
+    (wrong.json as { error?: { message?: string } })?.error?.message,
+  );
+  equal(
+    '未知用户与错误密码的错误码一致',
+    (unknown.json as { error?: { code?: string } })?.error?.code,
+    (wrong.json as { error?: { code?: string } })?.error?.code,
+  );
+
+  const login = await http(fixture, 'POST', '/admin/api/auth/login', {
+    key: null,
+    json: { username: 'admin', password },
+  });
+  equal('正确密码 → 200', login.status, 200);
+  const setCookie = login.headers.get('set-cookie') ?? '';
+  check('下发会话 Cookie', setCookie.includes('nami_session='), setCookie);
+  check('Cookie 带 HttpOnly', /httponly/i.test(setCookie), setCookie);
+  check('Cookie 带 SameSite=Strict', /samesite=strict/i.test(setCookie), setCookie);
+  check('明文 HTTP 下不误标 Secure', !/;\s*secure/i.test(setCookie), setCookie);
+
+  const token = /nami_session=([^;]+)/.exec(setCookie)?.[1] ?? '';
+  check('取到会话令牌', token !== '');
+
+  /* --------------------- the database holds only a hash --------------------- */
+
+  equal('会话已落库', fixture.app.deps.store.countAuthSessions(), 1);
+  const dbHash = createHash('sha256').update(token, 'utf8').digest('hex');
+  check('可用 SHA-256(令牌) 反查到会话', fixture.app.deps.store.findAuthSession(dbHash) !== null);
+  check('令牌原文在库里查不到', fixture.app.deps.store.findAuthSession(token) === null);
+
+  /* ---------------------------- cookie auth ---------------------------- */
+
+  const cookie = { cookie: `nami_session=${token}` };
+  const me = await http(fixture, 'GET', '/admin/api/auth/me', { key: null, headers: cookie });
+  equal(
+    '带 Cookie 的 /me → authenticated',
+    (me.json as { authenticated?: boolean })?.authenticated,
+    true,
+  );
+  equal(
+    '带 Cookie 的 /me 报出用户名',
+    (me.json as { user?: { username?: string } })?.user?.username,
+    'admin',
+  );
+  equal('via 标记为 session', (me.json as { via?: string })?.via, 'session');
+
+  equal(
+    'Cookie 可用于 /admin/api/*',
+    (await http(fixture, 'GET', '/admin/api/users', { key: null, headers: cookie })).status,
+    200,
+  );
+  equal(
+    'Cookie 也可用于 /v1/*（控制台的对话与模型页依赖它）',
+    (await http(fixture, 'GET', '/v1/models', { key: null, headers: cookie })).status,
+    200,
+  );
+  equal(
+    '没有 Cookie 时 /admin/api/* 仍然 401',
+    (await http(fixture, 'GET', '/admin/api/users', { key: null })).status,
+    401,
+  );
+
+  /* --------------------------- account admin --------------------------- */
+
+  const created = await http(fixture, 'POST', '/admin/api/users', {
+    key: null,
+    headers: cookie,
+    json: { username: 'ALICE', password: 'alice-password-123', isAdmin: false },
+  });
+  equal('新建账号 → 201', created.status, 201);
+  equal(
+    '新建用户名同样规范化为小写',
+    (created.json as { user?: { username?: string } })?.user?.username,
+    'alice',
+  );
+
+  equal(
+    '重复用户名 → 409',
+    (
+      await http(fixture, 'POST', '/admin/api/users', {
+        key: null,
+        headers: cookie,
+        json: { username: 'alice', password: 'another-password-123' },
+      })
+    ).status,
+    409,
+  );
+  equal(
+    '过短的密码 → 400',
+    (
+      await http(fixture, 'POST', '/admin/api/users', {
+        key: null,
+        headers: cookie,
+        json: { username: 'bob', password: 'short' },
+      })
+    ).status,
+    400,
+  );
+  equal(
+    '非法用户名 → 400',
+    (
+      await http(fixture, 'POST', '/admin/api/users', {
+        key: null,
+        headers: cookie,
+        json: { username: 'a b!', password: 'bob-password-123' },
+      })
+    ).status,
+    400,
+  );
+
+  const listed = await http(fixture, 'GET', '/admin/api/users', { key: null, headers: cookie });
+  const listedRaw = JSON.stringify(listed.json);
+  equal('账号列表含 2 个账号', (listed.json as { data?: unknown[] })?.data?.length, 2);
+  check('账号列表不含任何口令材料', !listedRaw.includes('scrypt$') && !listedRaw.includes(password));
+
+  type UserRow = { id: string; username: string };
+  const rows = (listed.json as { data?: UserRow[] }).data ?? [];
+  const alice = rows.find((entry) => entry.username === 'alice');
+  const admin = rows.find((entry) => entry.username === 'admin');
+
+  equal(
+    '管理员重置他人密码 → 200',
+    (
+      await http(fixture, 'POST', `/admin/api/users/${alice?.id ?? ''}/password`, {
+        key: null,
+        headers: cookie,
+        json: { password: 'alice-reset-password-1' },
+      })
+    ).status,
+    200,
+  );
+  equal(
+    '被重置的账号可用新密码登录',
+    (
+      await http(fixture, 'POST', '/admin/api/auth/login', {
+        key: null,
+        json: { username: 'alice', password: 'alice-reset-password-1' },
+      })
+    ).status,
+    200,
+  );
+
+  /* --------------------- last-admin and self guards --------------------- */
+
+  equal(
+    '不能删除当前登录账号 → 409',
+    (
+      await http(fixture, 'DELETE', `/admin/api/users/${admin?.id ?? ''}`, {
+        key: null,
+        headers: cookie,
+      })
+    ).status,
+    409,
+  );
+  equal(
+    '不能降级最后一个管理员 → 409',
+    (
+      await http(fixture, 'PUT', `/admin/api/users/${admin?.id ?? ''}`, {
+        key: null,
+        headers: cookie,
+        json: { isAdmin: false },
+      })
+    ).status,
+    409,
+  );
+  equal(
+    '可以停用普通账号 → 200',
+    (
+      await http(fixture, 'PUT', `/admin/api/users/${alice?.id ?? ''}`, {
+        key: null,
+        headers: cookie,
+        json: { disabled: true },
+      })
+    ).status,
+    200,
+  );
+  equal(
+    '停用后无法登录 → 401',
+    (
+      await http(fixture, 'POST', '/admin/api/auth/login', {
+        key: null,
+        json: { username: 'alice', password: 'alice-reset-password-1' },
+      })
+    ).status,
+    401,
+  );
+
+  /* --------------------------- password change --------------------------- */
+
+  const second = await http(fixture, 'POST', '/admin/api/auth/login', {
+    key: null,
+    json: { username: 'admin', password },
+  });
+  const secondToken = /nami_session=([^;]+)/.exec(second.headers.get('set-cookie') ?? '')?.[1] ?? '';
+  check('同一账号可以有第二个会话', secondToken !== '');
+
+  const changed = await http(fixture, 'POST', '/admin/api/auth/password', {
+    key: null,
+    headers: cookie,
+    json: { currentPassword: password, newPassword: 'brand-new-password-9' },
+  });
+  equal('修改自己的密码 → 200', changed.status, 200);
+  check(
+    '改密报告注销了其它会话',
+    ((changed.json as { revokedSessions?: number })?.revokedSessions ?? 0) >= 1,
+  );
+  equal(
+    '改密后其它设备的会话立即失效 → 401',
+    (
+      await http(fixture, 'GET', '/admin/api/users', {
+        key: null,
+        headers: { cookie: `nami_session=${secondToken}` },
+      })
+    ).status,
+    401,
+  );
+  equal(
+    '旧密码不再可用 → 401',
+    (
+      await http(fixture, 'POST', '/admin/api/auth/login', {
+        key: null,
+        json: { username: 'admin', password },
+      })
+    ).status,
+    401,
+  );
+  equal(
+    'API Key 不能改密码（没有对应账号）→ 403',
+    (
+      await http(fixture, 'POST', '/admin/api/auth/password', {
+        key: fixture.key,
+        json: { currentPassword: 'x', newPassword: 'whatever-password-1' },
+      })
+    ).status,
+    403,
+  );
+
+  /* ------------------------------- logout ------------------------------- */
+
+  const third = await http(fixture, 'POST', '/admin/api/auth/login', {
+    key: null,
+    json: { username: 'admin', password: 'brand-new-password-9' },
+  });
+  const thirdToken = /nami_session=([^;]+)/.exec(third.headers.get('set-cookie') ?? '')?.[1] ?? '';
+  equal(
+    '退出登录 → 200',
+    (
+      await http(fixture, 'POST', '/admin/api/auth/logout', {
+        key: null,
+        headers: { cookie: `nami_session=${thirdToken}` },
+      })
+    ).status,
+    200,
+  );
+  equal(
+    '退出后该 Cookie 立即失效 → 401',
+    (
+      await http(fixture, 'GET', '/admin/api/users', {
+        key: null,
+        headers: { cookie: `nami_session=${thirdToken}` },
+      })
+    ).status,
+    401,
+  );
+
+  /* ------------------------------- lockout ------------------------------- */
+
+  const lockFixture = await startServer('auth-lock', {
+    NAMI_ADMIN_PASSWORD: 'lockout-password-123',
+    NAMI_LOGIN_MAX_ATTEMPTS: '3',
+    NAMI_LOGIN_LOCKOUT_SECONDS: '60',
+  });
+  let lastStatus = 0;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const result = await http(lockFixture, 'POST', '/admin/api/auth/login', {
+      key: null,
+      json: { username: 'admin', password: 'wrong-password' },
+    });
+    lastStatus = result.status;
+    if (result.status === 429) {
+      check('锁定响应带 Retry-After', (result.headers.get('retry-after') ?? '') !== '');
+      break;
+    }
+  }
+  equal('连续失败达到阈值后 → 429', lastStatus, 429);
+  equal(
+    '锁定期内即使密码正确也被拒 → 429',
+    (
+      await http(lockFixture, 'POST', '/admin/api/auth/login', {
+        key: null,
+        json: { username: 'admin', password: 'lockout-password-123' },
+      })
+    ).status,
+    429,
+  );
+}
+
 /* ------------------------------------------------------------------ *
  * Entry point
  * ------------------------------------------------------------------ */
@@ -2982,6 +3338,7 @@ async function main(): Promise<void> {
     testConfigHygiene();
     await testLogsAndConfig();
     await testRateLimitAndLimits();
+    await testConsoleAccounts();
   } catch (error) {
     failures.push({
       name: 'unexpected exception',

@@ -129,6 +129,57 @@ export interface ToolInvocationRecord {
 }
 
 /* ------------------------------------------------------------------ *
+ * Console accounts and login sessions
+ * ------------------------------------------------------------------ */
+
+/**
+ * A console account.
+ *
+ * `passwordHash` is present here because the store returns rows as-is; it must
+ * never reach a response body. The route layer maps to `PublicUser` for that,
+ * which is why the two types are separate rather than one with an optional field.
+ */
+export interface UserRecord {
+  id: string;
+  username: string;
+  passwordHash: string;
+  isAdmin: boolean;
+  disabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+  lastLoginAt: number | null;
+}
+
+/** A user as it is safe to serialise: everything except the hash. */
+export interface PublicUser {
+  id: string;
+  username: string;
+  isAdmin: boolean;
+  disabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+  lastLoginAt: number | null;
+}
+
+/** One browser login session. */
+export interface AuthSessionRecord {
+  userId: string;
+  createdAt: number;
+  expiresAt: number;
+  lastSeenAt: number;
+  userAgent: string | null;
+  ip: string | null;
+}
+
+/** Failure counter backing the login lockout. */
+export interface LoginAttemptRecord {
+  failures: number;
+  firstAt: number;
+  lastAt: number;
+  lockedUntil: number | null;
+}
+
+/* ------------------------------------------------------------------ *
  * Agent event stream
  * ------------------------------------------------------------------ */
 

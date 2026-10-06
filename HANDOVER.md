@@ -11,7 +11,7 @@ Nami 是一个自托管的 AI Agent 服务器载体（Node.js + TypeScript，**�
 功能完整、测试充分。
 
 > ✅ **2026-10-06 已在真实 Linux 上跑过第 1 节的 ①—④**（Ubuntu + Node v22.23.2）：
-> 类型检查 0 错误、可移植性 **574 项 0 问题**、smoke **482 项全过**、插件自检 **448 项全过**、
+> 类型检查 0 错误、可移植性 **628 项 0 问题**、smoke **541 项全过**、插件自检 **448 项全过**、
 > 真实启动后 `/healthz`、`/v1/models`、`/v1/agent/run`（含工具循环）、SSE 事件流、`/admin` 全部正常，
 > SIGTERM 优雅退出也补测了。逐项记录见 `docs/linux-acceptance-2026-10-06.md`。
 >
@@ -41,7 +41,7 @@ node -v                     # 必须 >= 22.6，强烈推荐 24.x
 
 # ── ② 全量测试（类型检查 + 可移植性检查 + 端到端断言）──────────
 npm test                    # 期望：✗ 0 项失败
-                            # 482 项断言 + 574 项可移植性检查
+                            # 541 项断言 + 628 项可移植性检查
 
 # ── ③ AstrBot 插件的离线自检（独立于上面那套）─────────────────
 cd integrations && python3 selftest_plugin_nami.py && cd ..
@@ -75,8 +75,8 @@ curl -s localhost:8787/healthz
 | 内容 | 验证方式 | Windows | Linux | 说明 |
 | --- | --- | --- | --- | --- |
 | 类型检查（tsc，`erasableSyntaxOnly`） | `npm run typecheck` | ✅ 0 错误 | ✅ **0 错误** | tsc 本身跨平台；2026-10-06 实测确认 |
-| 端到端断言 482 项 | `npm run smoke` | ✅ 全过 | ✅ **482 项全过** | 真实 HTTP / SSE / WebSocket / SQLite |
-| 可移植性静态检查 574 项 | `npm run check:portability` | ✅ 0 问题 | ✅ **0 问题** | 见下方「已静态排除的风险」 |
+| 端到端断言 541 项 | `npm run smoke` | ✅ 全过 | ✅ **541 项全过** | 真实 HTTP / SSE / WebSocket / SQLite |
+| 可移植性静态检查 628 项 | `npm run check:portability` | ✅ 0 问题 | ✅ **0 问题** | 见下方「已静态排除的风险」 |
 | AstrBot 插件自检 448 项 | `python3 selftest_plugin_nami.py` | ✅ 全过 | ✅ **448 项全过** | 纯标准库，跨平台风险低 |
 | **Docker 镜像构建** | `docker build` | ❌ 无 docker | — **不适用** | **本项目不使用 Docker**（2026-10-06 决定）；从未构建过，将来要用需从头验证 |
 | **Alpine / musl 运行时** | 容器实跑 | ❌ | — **不适用** | 不走容器就没有这条路径；零原生依赖，理论上无风险 |
@@ -88,12 +88,12 @@ curl -s localhost:8787/healthz
 | AstrBot 插件被真实 AstrBot 加载 | WebUI 里加载 | ❌ **未验证** | ❌ | 环境没有 AstrBot；正确性基于桩 API + 官方文档 |
 | 管理面板视觉/交互 | 浏览器 | ❌ **未目视检查** | ❌ | 只做了 JS 语法检查 + 端点一致性核对 |
 | **WebUI 构建（`vite build`）** | `npm --prefix webui run build` | ✅ 成功 | ✅ **成功（4.1s）** | 2026-10-06 在 Linux 上真构建过一次，且产物**可复现**——54 个既有资源文件名与字节全不变，`index.html` 零差异；产物已提交，平时**不需要**重新构建 |
-| **WebUI 运行时（浏览器）** | 实际点击每个页面 | ❌ **从未运行** | ⚠️ 仅产物完整性 | 无浏览器环境；类型检查通过、SFC 编译通过、产物引用图完整，但**没有人真正打开过这些页面**。2026-10-06 在 Linux 上逐个请求了 `index.html` 引用的 4 个资源（全部 200），并顺带发现 favicon 404（**已修**） |
-| **WebUI 图标渲染** | 产物内 SVG 路径核对 | ✅ 已验证 | ⚠️ 推断 | 曾在产物中确认 `mdiSend` 的真实路径存在、裸 `mdi*` 字符串为 0；视觉未见 |
+| **WebUI 运行时（浏览器）** | 实际打开并逐页巡检 | ❌ **从未运行** | ✅ **已在浏览器里跑通** | 2026-10-06 用 headless Chromium 打开真实页面：账号登录、10 个页面逐个巡检、对话页真实发消息并渲染出工具调用卡片，控制台零报错。**顺带修掉 3 个只有浏览器才会暴露的缺陷**（CSP 白屏、图标全空白、favicon 404），详见 `docs/linux-acceptance-2026-10-06.md` |
+| **WebUI 图标渲染** | 产物内 SVG 路径核对 | ✅ 已验证 | ✅ **浏览器里已确认** | 曾核对产物内 `mdiSend` 路径存在；2026-10-06 进一步发现「裸 `mdi*` 名字从不查 aliases」导致全部图标空白，已改为自定义 icon set 并目视确认 |
 
 ### 已经静态排除的 Linux 风险
 
-`npm run check:portability` 逐条查这些，当前 **574 项检查 0 问题**：
+`npm run check:portability` 逐条查这些，当前 **628 项检查 0 问题**：
 
 - **模块路径大小写**：Windows 上 `./Types.ts` 能找到 `types.ts`，Linux 上直接 404。检查器对每个相对导入**逐段做精确大小写比对**（`existsSync` 不够——它在 Windows 上会放行错误大小写）。
 - **资源引用大小写**：`panel.html`、`docs.html`、`logo.png`、页面里的 `./app.js` / `./style.css`。
@@ -197,8 +197,8 @@ neko-NamiServer/
 │   ├── web/                    panel.html（管理面板）+ docs.html（API 参考）
 │   └── openapi.ts              OpenAPI 3.1 规范（由测试校验与路由一致）
 ├── scripts/
-│   ├── smoke.ts                端到端测试，482 项断言
-│   ├── check-portability.ts    ★ 跨平台静态检查，574 项
+│   ├── smoke.ts                端到端测试，541 项断言
+│   ├── check-portability.ts    ★ 跨平台静态检查，628 项
 │   └── ollama.ts               一键接入 Ollama 向导
 ├── integrations/               ★ 独立于运行时，不进 Docker 镜像
 │   ├── astrbot_plugin_nami/    AstrBot 插件（Python，零第三方依赖）
@@ -277,9 +277,9 @@ NAMI_DB_PATH=/app/data/nami.sqlite
 > 完整原始输出与逐项记录见 `docs/linux-acceptance-2026-10-06.md`。
 
 - [x] `node -v` 版本：**v22.23.2**（满足 >= 22.6；非推荐的 24.x 也能跑）
-- [x] `npm test` 结果：**482** 项断言，失败数：**0**（`tsc` 0 错误 + 可移植性 574 项 0 问题 + smoke 482 项全过）
+- [x] `npm test` 结果：**541** 项断言，失败数：**0**（`tsc` 0 错误 + 可移植性 628 项 0 问题 + smoke 541 项全过）
 - [x] `python3 selftest_plugin_nami.py` 结果：**✓ 全部通过 448 项断言**（Python 3.10.12）
-- [x] `npm run check:portability` 结果：**✓ 通过 574 项检查，未发现阻碍 Linux 运行的问题**
+- [x] `npm run check:portability` 结果：**✓ 通过 628 项检查，未发现阻碍 Linux 运行的问题**
 - [x] `docker build` 是否成功：**不适用**——本项目已决定不使用 Docker（2026-10-06）。作为替代，按 Dockerfile 逐条静态审计了它对本机实测运行时的假设，未发现阻断性问题（见 §3 ①）
 - [x] 容器内 `curl localhost:8787/healthz` 是否正常：**不适用**（不用 Docker）。**宿主机上已实测正常**（200，且免鉴权、不受限流影响）
 - [x] `docker stop` 是否干净退出（日志有无 `shutdown complete`）：**以直接对进程发 `SIGTERM` 代替**——约 500ms 退出、码 0，日志打出 `shutdown complete`；但**首次实测打出 `unhandled promise rejection: database is not open`**，根因是关闭后仍查库，**已修并复验**（见 §3 ④）

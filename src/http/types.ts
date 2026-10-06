@@ -5,7 +5,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Logger } from '../logger.ts';
 
-export type AuthVia = 'bearer' | 'admin-token' | 'query' | 'none';
+export type AuthVia = 'bearer' | 'admin-token' | 'query' | 'session' | 'none';
 
 export interface AuthInfo {
   /** API key that authenticated the request, or `anonymous`. */
@@ -13,6 +13,19 @@ export interface AuthInfo {
   via: AuthVia;
   /** True when the caller presented a valid admin token. */
   isAdmin: boolean;
+  /**
+   * Set only for cookie-authenticated console sessions.
+   *
+   * Present so a route can answer "who am I" without re-reading the session row,
+   * and so `maskKey` has something better than a token hash to log.
+   */
+  user?: {
+    id: string;
+    username: string;
+    isAdmin: boolean;
+    /** Hash of the session token, needed to revoke exactly this session. */
+    sessionTokenHash: string;
+  };
 }
 
 export interface RequestContext {

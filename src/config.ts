@@ -166,6 +166,42 @@ export interface OneBotConfig {
   };
 }
 
+/**
+ * Console account/password authentication.
+ *
+ * API keys keep working for `/v1/*` and for tooling; this section is about the
+ * human logging into the WebUI.
+ */
+export interface AuthConfig {
+  /**
+   * Username seeded on first boot. Only used while the `users` table is empty —
+   * after that the database is authoritative, so removing the variable cannot
+   * silently change (or re-create) an account.
+   */
+  bootstrapUser: string;
+  /**
+   * Plain-text password for that first account. Read once, hashed with scrypt,
+   * and never stored. Empty means "generate a random one and print it", which
+   * keeps a fresh install from coming up with a guessable default.
+   */
+  bootstrapPassword: string;
+  /** How long a console login lasts. */
+  sessionTtlMs: number;
+  cookieName: string;
+  /** `auto` marks the cookie Secure whenever the request looks like HTTPS. */
+  cookieSecure: 'auto' | 'always' | 'never';
+  /**
+   * Trust `X-Forwarded-Proto`. Off by default because any client can send that
+   * header; turn it on only behind a reverse proxy you control.
+   */
+  trustProxy: boolean;
+  /** Failures before a lockout, counted per username and per client address. */
+  maxAttempts: number;
+  lockoutMs: number;
+  /** Failures older than this start a fresh count. */
+  attemptWindowMs: number;
+}
+
 export interface Config {
   version: string;
   host: string;
@@ -186,6 +222,8 @@ export interface Config {
   adminToken: string | null;
   /** True when auth was auto-generated for a first run. */
   generatedKey: string | null;
+
+  auth: AuthConfig;
 
   corsOrigin: string;
   maxBodyBytes: number;
@@ -274,6 +312,13 @@ function envBool(key: string, fallback: boolean): boolean {
   const raw = process.env[key];
   if (raw === undefined || raw.trim() === '') return fallback;
   return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+}
+
+/** Reads one of a fixed set of values; anything else falls back silently. */
+function envEnum<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
+  const raw = process.env[key]?.trim().toLowerCase();
+  if (raw === undefined || raw === '') return fallback;
+  return (allowed as readonly string[]).includes(raw) ? (raw as T) : fallback;
 }
 
 function envList(key: string): string[] {
@@ -370,6 +415,20 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
     apiKeys,
     adminToken: process.env.NAMI_ADMIN_TOKEN?.trim() || null,
     generatedKey,
+
+    auth: {
+      bootstrapUser: envStr('NAMI_ADMIN_USER', 'admin'),
+      // Not trimmed: a leading/trailing space can be a deliberate part of a
+      // passphrase, and `.env` parsing already strips the quoting.
+      bootstrapPassword: envStr('NAMI_ADMIN_PASSWORD', ''),
+      sessionTtlMs: envInt('NAMI_SESSION_TTL_HOURS', 168, 1) * 3_600_000,
+      cookieName: envStr('NAMI_SESSION_COOKIE', 'nami_session'),
+      cookieSecure: envEnum('NAMI_COOKIE_SECURE', ['auto', 'always', 'never'] as const, 'auto'),
+      trustProxy: envBool('NAMI_TRUST_PROXY', false),
+      maxAttempts: envInt('NAMI_LOGIN_MAX_ATTEMPTS', 5, 1),
+      lockoutMs: envInt('NAMI_LOGIN_LOCKOUT_SECONDS', 300, 0) * 1000,
+      attemptWindowMs: envInt('NAMI_LOGIN_WINDOW_SECONDS', 900, 0) * 1000,
+    },
 
     corsOrigin: envStr('NAMI_CORS_ORIGIN', '*'),
     maxBodyBytes: envInt('NAMI_MAX_BODY_BYTES', 1_048_576, 1024),
