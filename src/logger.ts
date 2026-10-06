@@ -3,7 +3,11 @@
  *
  * Emits single-line JSON in production (`NAMI_LOG_FORMAT=json`) or a compact
  * human-readable line in development. No external dependency.
+ *
+ * Optionally mirrors entries into a `LogBus` so the WebUI can tail them.
  */
+
+import type { LogBus } from './logbus.ts';
 
 export const LOG_LEVELS = ['debug', 'info', 'warn', 'error', 'silent'] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
@@ -42,6 +46,11 @@ export interface LoggerOptions {
   format: 'json' | 'pretty';
   /** Disable ANSI colours (auto-disabled when the format is json). */
   color?: boolean;
+  /**
+   * Optional sink for the WebUI log page. Receives entries at the bus's own
+   * capture level, which is independent of this logger's console threshold.
+   */
+  bus?: LogBus;
 }
 
 function safeJson(value: unknown): string {
@@ -66,14 +75,19 @@ function normaliseFields(fields: LogFields): LogFields {
 }
 
 export function createLogger(base: LogFields, options: LoggerOptions): Logger {
-  const { level, format } = options;
+  const { level, format, bus } = options;
   const color = options.color ?? format === 'pretty';
   const threshold = LEVEL_RANK[level];
 
   const build = (bound: LogFields): Logger => {
     const emit = (lvl: Exclude<LogLevel, 'silent'>, msg: string, fields?: LogFields): void => {
-      if (LEVEL_RANK[lvl] < threshold) return;
       const merged = { ...bound, ...(fields ? normaliseFields(fields) : {}) };
+
+      // The WebUI sink first, and before the console threshold: UI verbosity is
+      // an operator choice that must not be tied to console verbosity.
+      if (bus && bus.captures(lvl)) bus.push(lvl, msg, merged);
+
+      if (LEVEL_RANK[lvl] < threshold) return;
       const time = new Date().toISOString();
 
       if (format === 'json') {

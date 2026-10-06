@@ -13,6 +13,11 @@
 #     directly through Node's built-in type stripping (`node src/index.ts`),
 #     which is why the `.ts` sources are the shipped artifact.
 #
+#   * The WebUI is a Vue + Vuetify SPA, but its COMPILED output is committed at
+#     `src/web/app`. That is why this image needs no Node build toolchain and no
+#     multi-stage build: `COPY src/` already carries the finished bundle, and
+#     `webui/` (sources + node_modules) is excluded by .dockerignore.
+#
 #   * Node >= 22.6 is required (type stripping + the built-in `node:sqlite`
 #     module). Node 24 is the recommended runtime, hence node:24-alpine.
 #

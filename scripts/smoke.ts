@@ -9,7 +9,7 @@
  * Run with: npm run smoke
  */
 
-import { mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, isAbsolute, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -830,9 +830,37 @@ async function testAdminAndPanel(main: Fixture): Promise<void> {
   const panel = await http(main, 'GET', '/admin', { key: null });
   equal('/admin 无需鉴权返回 200', panel.status, 200);
   check('/admin 返回 HTML', (panel.headers.get('content-type') ?? '').includes('text/html'));
-  check('/admin 页面非空', panel.body.length > 2000);
   check('/admin 设置 CSP 头', panel.headers.get('content-security-policy') !== null);
   check('/admin 设置 nosniff', panel.headers.get('x-content-type-options') === 'nosniff');
+  check('/admin 是 SPA 外壳（含挂载点）', panel.body.includes('id="app"'), panel.body.slice(0, 160));
+  check('/admin 外壳引用了构建产物', /\/admin\/assets\/.+\.js/.test(panel.body));
+
+  // The classic panel is the no-build escape hatch, and must stay reachable.
+  const classic = await http(main, 'GET', '/admin/classic', { key: null });
+  equal('/admin/classic 仍然可用', classic.status, 200);
+  check('/admin/classic 是完整面板', classic.body.length > 2000, `${classic.body.length} 字节`);
+
+  // Hash routing means any /admin sub-path returns the same shell.
+  const deepLink = await http(main, 'GET', '/admin/some/deep/route', { key: null });
+  equal('未知的 /admin 子路径回退到外壳', deepLink.status, 200);
+  check('回退内容与外壳一致', deepLink.body === panel.body);
+
+  // A missing .js must 404 rather than return HTML, or the failure is invisible.
+  const missingAsset = await http(main, 'GET', '/admin/assets/does-not-exist.js', { key: null });
+  equal('缺失的 JS 资源返回 404 而不是外壳', missingAsset.status, 404);
+
+  const traversal = await http(main, 'GET', '/admin/assets/..%2f..%2fpackage.json', { key: null });
+  check('资源路径穿越被拒绝', traversal.status === 404 || !traversal.body.includes('"name"'), `${traversal.status}`);
+
+  const firstAsset = /\/admin\/(assets\/[^"]+\.js)/.exec(panel.body)?.[1];
+  if (firstAsset) {
+    const asset = await http(main, 'GET', `/admin/${firstAsset}`, { key: null });
+    equal('构建产物可被取到', asset.status, 200);
+    check('产物带 JS content-type', (asset.headers.get('content-type') ?? '').includes('javascript'));
+    check('哈希命名产物被标记为不可变缓存', (asset.headers.get('cache-control') ?? '').includes('immutable'));
+  } else {
+    check('外壳中能找到构建产物路径', false, '未匹配到 assets/*.js');
+  }
 
   // With an admin token configured, an ordinary API key must not reach admin APIs.
   const apiKeyOnAdmin = await http(main, 'GET', '/admin/api/overview', { key: main.key });
@@ -1671,10 +1699,22 @@ async function testOpenApiSurface(main: Fixture): Promise<void> {
     if (pattern.length > 1 && pattern.endsWith('/')) pattern = pattern.slice(0, -1);
     registered.add(`${route.method} ${pattern}`);
   }
+
+  // Static pages are intentionally served ahead of the router, so they are
+  // documented but not registered. Listing them explicitly keeps the check
+  // exact rather than vaguely lenient.
+  const SERVED_OUTSIDE_ROUTER = new Set(['GET /admin', 'GET /admin/classic']);
+
   const missing = [...registered].filter((route) => !documented.has(route));
-  const extra = [...documented].filter((route) => !registered.has(route));
+  const extra = [...documented].filter(
+    (route) => !registered.has(route) && !SERVED_OUTSIDE_ROUTER.has(route),
+  );
   check('规范覆盖了全部已注册路由', missing.length === 0, missing.join(', '));
   check('规范没有多余或不存在的路由', extra.length === 0, extra.join(', '));
+  check(
+    '规范记录了在路由器之外提供的静态页面',
+    [...SERVED_OUTSIDE_ROUTER].every((route) => documented.has(route)),
+  );
 
   const docs = await http(main, 'GET', '/docs', { key: null });
   equal('/docs 无需鉴权 → 200', docs.status, 200);
@@ -2417,13 +2457,451 @@ function testConfigHygiene(): void {
   check('默认 dbPath 使用本机路径分隔符', base.dbPath.includes(sep), base.dbPath);
   check('会话 id 校验接受连字符与冒号', isValidSessionId('qq-group-123') && isValidSessionId('astrbot:group:42'));
   const windowsStyleSessionId = 'a\\b'; // portability-ok: 故意构造 Windows 风格路径做反例
+  const dotDotSessionId = '../etc/passwd'; // portability-ok: 同上，这是要被拒绝的输入
   check(
     '会话 id 校验拒绝路径分隔符',
-    !isValidSessionId('../etc/passwd') &&
+    !isValidSessionId(dotDotSessionId) &&
       !isValidSessionId('a/b') &&
       !isValidSessionId(windowsStyleSessionId),
   );
   check('会话 id 校验拒绝空串与超长', !isValidSessionId('') && !isValidSessionId('x'.repeat(129)));
+}
+
+/* ------------------------------------------------------------------ *
+ * Logs and configuration
+ * ------------------------------------------------------------------ */
+
+async function testLogsAndConfig(): Promise<void> {
+  section('日志环形缓冲与实时流');
+
+  const fixture = await startServer('logs', {
+    NAMI_LOG_LEVEL: 'debug',
+    NAMI_LOG_CAPTURE_LEVEL: 'debug',
+    NAMI_LOG_BUFFER_SIZE: '50',
+  });
+  const admin = { key: null, adminToken: ADMIN_TOKEN };
+  const { logs } = fixture.app.deps;
+
+  // Drive some traffic so the request logger has something to record.
+  for (let index = 0; index < 3; index += 1) {
+    await http(fixture, 'GET', '/v1/models', { key: fixture.key });
+  }
+
+  const listed = await http(fixture, 'GET', '/admin/api/logs?limit=50', admin);
+  equal('日志列表 → 200', listed.status, 200);
+  const listedJson = listed.json as {
+    data?: Array<{ seq: number; time: string; level: string; msg: string; fields: unknown }>;
+    captureLevel?: string;
+    capacity?: number;
+    buffered?: number;
+  };
+  check('日志列表非空', (listedJson.data?.length ?? 0) > 0);
+  equal('captureLevel 回显配置', listedJson.captureLevel, 'debug');
+  equal('capacity 回显配置', listedJson.capacity, 50);
+  check(
+    '条目含 seq/time/level/msg',
+    (listedJson.data ?? []).every(
+      (entry) =>
+        typeof entry.seq === 'number' &&
+        typeof entry.time === 'string' &&
+        typeof entry.level === 'string' &&
+        typeof entry.msg === 'string',
+    ),
+  );
+  check(
+    'seq 单调递增',
+    (listedJson.data ?? []).every((entry, index, all) => index === 0 || entry.seq > (all[index - 1]?.seq ?? 0)),
+  );
+
+  const badLevel = await http(fixture, 'GET', '/admin/api/logs?level=nope', admin);
+  equal('非法 level → 400', badLevel.status, 400);
+
+  /* ------------------------- redaction is the point ------------------------ */
+
+  logs.clear();
+  fixture.app.deps.log.info('脱敏探针', {
+    authorization: 'Bearer super-secret-token',
+    nested: { apiKey: 'abc123', event_token: 'xyz' },
+    safe: '这个值应该保留',
+    list: [{ token: 'inside-array' }],
+  });
+
+  const afterProbe = await http(fixture, 'GET', '/admin/api/logs', admin);
+  const probe = (afterProbe.json as { data?: Array<{ msg: string; fields: Record<string, unknown> }> }).data?.find(
+    (entry) => entry.msg === '脱敏探针',
+  );
+  check('探针条目已入缓冲', probe !== undefined);
+  equal('authorization 被脱敏', probe?.fields.authorization, '***redacted***');
+  equal(
+    '嵌套 apiKey 被脱敏',
+    (probe?.fields.nested as { apiKey?: string } | undefined)?.apiKey,
+    '***redacted***',
+  );
+  equal(
+    '嵌套 event_token 被脱敏',
+    (probe?.fields.nested as { event_token?: string } | undefined)?.event_token,
+    '***redacted***',
+  );
+  equal(
+    '数组中对象的 token 也被脱敏',
+    ((probe?.fields.list as Array<{ token?: string }> | undefined) ?? [])[0]?.token,
+    '***redacted***',
+  );
+  equal('非敏感字段原样保留', probe?.fields.safe, '这个值应该保留');
+  check(
+    '序列化后的条目里不含任何明文密钥',
+    !JSON.stringify(probe ?? {}).includes('super-secret-token') &&
+      !JSON.stringify(probe ?? {}).includes('abc123') &&
+      !JSON.stringify(probe ?? {}).includes('inside-array'),
+  );
+
+  /* --------------------------------- SSE ---------------------------------- */
+
+  // Frames are collected as they arrive rather than by awaiting the whole
+  // response: aborting the request throws, which would discard everything
+  // already received.
+  const collected: Array<{ msg: string; level: string }> = [];
+  const controller = new AbortController();
+
+  const ssePromise = (async (): Promise<void> => {
+    // The log stream is an admin endpoint, so the query credential must be the
+    // ADMIN token — an ordinary API key is correctly refused with 403.
+    const response = await fetch(
+      `${fixture.base}/admin/api/logs/stream?key=${encodeURIComponent(ADMIN_TOKEN)}&level=debug`,
+      { signal: controller.signal },
+    );
+    if (!response.ok || !response.body) return;
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let boundary = buffer.indexOf('\n\n');
+        while (boundary >= 0) {
+          const block = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          boundary = buffer.indexOf('\n\n');
+          let eventName = 'message';
+          const dataLines: string[] = [];
+          for (const line of block.split('\n')) {
+            if (line.startsWith(':')) continue;
+            if (line.startsWith('event:')) eventName = line.slice(6).trim();
+            else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+          }
+          if (eventName !== 'log' || dataLines.length === 0) continue;
+          try {
+            collected.push(JSON.parse(dataLines.join('\n')) as { msg: string; level: string });
+          } catch {
+            /* ignore malformed frames */
+          }
+        }
+      }
+    } catch {
+      // Expected: the test aborts the request to end the stream.
+    } finally {
+      reader.releaseLock();
+    }
+  })();
+
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  fixture.app.deps.log.warn('SSE 实时标记', { probe: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  controller.abort();
+  await ssePromise;
+
+  check('SSE 收到了实时日志', collected.some((entry) => entry.msg === 'SSE 实时标记'), `收到 ${collected.length} 条`);
+  check('SSE 先补发了历史（backfill）', collected.length > 1, `仅 ${collected.length} 条`);
+  check(
+    'SSE 帧携带正确的级别',
+    collected.find((entry) => entry.msg === 'SSE 实时标记')?.level === 'warn',
+    collected.find((entry) => entry.msg === 'SSE 实时标记')?.level,
+  );
+
+  const wrongQueryKey = await http(fixture, 'GET', '/admin/api/logs/stream?key=wrong', { key: null });
+  equal('日志流使用错误 key → 403', wrongQueryKey.status, 403);
+
+  const apiKeyOnStream = await http(
+    fixture,
+    'GET',
+    `/admin/api/logs/stream?key=${encodeURIComponent(fixture.key)}`,
+    { key: null },
+  );
+  equal('普通 API Key 不能连管理日志流 → 403', apiKeyOnStream.status, 403);
+
+  const headerAuthStream = await http(fixture, 'GET', '/admin/api/logs?limit=1', admin);
+  equal('用 admin 头仍然正常', headerAuthStream.status, 200);
+
+  /* -------------------------------- clearing ------------------------------ */
+
+  const cleared = await http(fixture, 'DELETE', '/admin/api/logs', admin);
+  equal('清空日志 → 200', cleared.status, 200);
+  check('返回清空的条数', typeof (cleared.json as { cleared?: number }).cleared === 'number');
+  const afterClear = await http(fixture, 'GET', '/admin/api/logs', admin);
+  // The GET above logs its own request on 'finish', so a couple of entries is expected.
+  check(
+    '清空后缓冲基本被清掉',
+    ((afterClear.json as { data?: unknown[] }).data?.length ?? 0) <= 3,
+    `${(afterClear.json as { data?: unknown[] }).data?.length ?? 0} 条`,
+  );
+
+  section('配置读写（.env）');
+
+  const envPath = join(DATA_DIR, `smoke-env-${process.pid}.env`);
+  const configFixture = await startServer('config', {
+    NAMI_ENV_PATH: envPath,
+    NAMI_LOG_LEVEL: 'error',
+  });
+
+  try {
+    const schema = await http(configFixture, 'GET', '/admin/api/config/schema', admin);
+    equal('配置 schema → 200', schema.status, 200);
+    const schemaJson = schema.json as {
+      fields?: Array<{ key: string; group: string; type: string; secret: boolean; value: unknown; configured?: boolean }>;
+      groups?: string[];
+      envFile?: { path: string; exists: boolean; writable: boolean };
+    };
+    check('返回了大量字段', (schemaJson.fields?.length ?? 0) > 50);
+    check('每个字段都有 key/group/type', (schemaJson.fields ?? []).every((f) => f.key && f.group && f.type));
+    check('字段分组非空', (schemaJson.groups?.length ?? 0) > 5);
+    equal('envFile 路径来自 NAMI_ENV_PATH', schemaJson.envFile?.path, envPath);
+
+    const secretFields = (schemaJson.fields ?? []).filter((field) => field.secret);
+    check('存在密钥类字段', secretFields.length > 0);
+    check(
+      '密钥字段的值恒为 null',
+      secretFields.every((field) => field.value === null),
+      secretFields.filter((f) => f.value !== null).map((f) => f.key).join(', '),
+    );
+    check('密钥字段带 configured 布尔', secretFields.every((field) => typeof field.configured === 'boolean'));
+    check(
+      'schema 响应里不含任何密钥明文',
+      !JSON.stringify(schema.json).includes(fixture.key) &&
+        !JSON.stringify(schema.json).includes(ADMIN_TOKEN),
+    );
+
+    /* ------------------------------ validation ---------------------------- */
+
+    const noConfirm = await http(configFixture, 'PUT', '/admin/api/config', {
+      key: null,
+      adminToken: ADMIN_TOKEN,
+      json: { changes: { NAMI_TEMPERATURE: '0.5' } },
+    });
+    equal('缺少 confirm → 400', noConfirm.status, 400);
+    check(
+      '错误码为 confirmation_required',
+      (noConfirm.json as { error?: { code?: string } })?.error?.code === 'confirmation_required',
+    );
+
+    const unknownKey = await http(configFixture, 'PUT', '/admin/api/config', {
+      key: null,
+      adminToken: ADMIN_TOKEN,
+      json: { changes: { NAMI_NOT_A_REAL_KEY: '1' }, confirm: true },
+    });
+    equal('未知配置项 → 400', unknownKey.status, 400);
+
+    const evilKey = await http(configFixture, 'PUT', '/admin/api/config', {
+      key: null,
+      adminToken: ADMIN_TOKEN,
+      json: { changes: { PATH: '/evil' }, confirm: true },
+    });
+    equal('非 NAMI_ 键 → 400', evilKey.status, 400);
+
+    const badEnum = await http(configFixture, 'PUT', '/admin/api/config', {
+      key: null,
+      adminToken: ADMIN_TOKEN,
+      json: { changes: { NAMI_LLM_PROVIDER: 'chatgpt' }, confirm: true },
+    });
+    equal('枚举值非法 → 400', badEnum.status, 400);
+    check(
+      '枚举错误说明了合法取值',
+      JSON.stringify(badEnum.json).includes('mock'),
+      (badEnum.json as { error?: { details?: unknown } })?.error?.details
+        ? JSON.stringify((badEnum.json as { error: { details: unknown } }).error.details)
+        : '',
+    );
+
+    const badInt = await http(configFixture, 'PUT', '/admin/api/config', {
+      key: null,
+      adminToken: ADMIN_TOKEN,
+      json: { changes: { NAMI_MAX_TOOL_ROUNDS: 'many' }, confirm: true },
+    });
+    equal('非整数 → 400', badInt.status, 400);
+
+    const partialReject = await http(configFixture, 'PUT', '/admin/api/config', {
+      key: null,
+      adminToken: ADMIN_TOKEN,
+      json: { changes: { NAMI_TEMPERATURE: '0.3', NAMI_MAX_TOOL_ROUNDS: 'oops' }, confirm: true },
+    });
+    equal('一坏全坏 → 400', partialReject.status, 400);
+    check('非法请求没有写出文件', !existsSync(envPath));
+
+    /* -------------------------------- writing ----------------------------- */
+
+    const saved = await http(configFixture, 'PUT', '/admin/api/config', {
+      key: null,
+      adminToken: ADMIN_TOKEN,
+      json: {
+        changes: {
+          NAMI_TEMPERATURE: '0.3',
+          NAMI_MAX_TOOL_ROUNDS: '4',
+          NAMI_LLM_PROVIDER: 'ollama',
+          NAMI_ONEBOT_ALLOW_GROUPS: '111, 222 ,333',
+          NAMI_LLM_API_KEY: 'sk-this-must-never-come-back',
+        },
+        confirm: true,
+      },
+    });
+    equal('合法写入 → 200', saved.status, 200);
+    check(
+      '响应说明了需要重启',
+      (saved.json as { restartRequired?: boolean })?.restartRequired === true,
+    );
+
+    const applied = (saved.json as { applied?: Array<{ key: string; to: string; secret: boolean }> }).applied ?? [];
+    equal('回显了 5 个改动', applied.length, 5);
+    check(
+      '密钥的新值以 *** 回显',
+      applied.find((change) => change.key === 'NAMI_LLM_API_KEY')?.to === '***',
+    );
+    check(
+      '响应体里不含密钥明文',
+      !JSON.stringify(saved.json).includes('sk-this-must-never-come-back'),
+    );
+    check(
+      '列表值被规整为逗号分隔且去空格',
+      applied.find((change) => change.key === 'NAMI_ONEBOT_ALLOW_GROUPS')?.to === '111,222,333',
+    );
+
+    check('.env 文件已创建', existsSync(envPath));
+    const written = readFileSync(envPath, 'utf8');
+    check('文件含写入的键', written.includes('NAMI_TEMPERATURE=0.3') && written.includes('NAMI_LLM_PROVIDER=ollama'));
+    check('文件不含 CRLF', !written.includes('\r\n'));
+
+    /* ------------------------------- idempotent --------------------------- */
+
+    const savedAgain = await http(configFixture, 'PUT', '/admin/api/config', {
+      key: null,
+      adminToken: ADMIN_TOKEN,
+      json: { changes: { NAMI_TEMPERATURE: '0.3' }, confirm: true },
+    });
+    equal('重复写入同样成功', savedAgain.status, 200);
+    equal('重复写入不改变文件内容', readFileSync(envPath, 'utf8'), written);
+    check(
+      '重复写入报告了旧值',
+      ((savedAgain.json as { applied?: Array<{ from: string | null }> }).applied ?? [])[0]?.from === '0.3',
+    );
+
+    /* --------------------------- secrets not writable --------------------- */
+
+    const emptySecret = await http(configFixture, 'PUT', '/admin/api/config', {
+      key: null,
+      adminToken: ADMIN_TOKEN,
+      json: { changes: { NAMI_LLM_API_KEY: '' }, confirm: true },
+    });
+    equal('可以把密钥清空', emptySecret.status, 200);
+    check('清空后文件里是空值', readFileSync(envPath, 'utf8').includes('NAMI_LLM_API_KEY='));
+  } finally {
+    for (const suffix of ['', '.bak']) {
+      try {
+        rmSync(`${envPath}${suffix}`, { force: true });
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * WebUI bundle integrity
+ *
+ * The compiled WebUI is committed to `src/web/app`. If a rebuild ever adds a
+ * chunk that is not committed, or references an asset that was never emitted,
+ * the failure only shows up in a browser — long after CI. This walks the
+ * bundle's own reference graph over HTTP and fails loudly instead.
+ * ------------------------------------------------------------------ */
+
+async function testWebUiBundle(main: Fixture): Promise<void> {
+  section('WebUI 构建产物完整性');
+
+  const shell = await http(main, 'GET', '/admin', { key: null });
+  equal('/admin 返回外壳', shell.status, 200);
+
+  // Every asset the shell points at must exist.
+  const referenced = new Set<string>();
+  const collect = (text: string): void => {
+    for (const match of text.matchAll(/\/admin\/assets\/([A-Za-z0-9_.-]+)/g)) {
+      referenced.add(match[1] as string);
+    }
+    // Vite also emits relative chunk references from inside a bundle.
+    for (const match of text.matchAll(/["'`]\.\/([A-Za-z0-9_-]+\.(?:js|css))["'`]/g)) {
+      referenced.add(match[1] as string);
+    }
+    for (const match of text.matchAll(/["'`]assets\/([A-Za-z0-9_.-]+\.(?:js|css))["'`]/g)) {
+      referenced.add(match[1] as string);
+    }
+  };
+
+  collect(shell.body);
+
+  const visited = new Set<string>();
+  const missing: string[] = [];
+  const wrongType: string[] = [];
+  let fetched = 0;
+
+  // Breadth-first over the bundle's own reference graph, bounded so a
+  // pathological graph cannot hang the suite.
+  while (referenced.size > 0 && fetched < 200) {
+    const name = [...referenced].find((candidate) => !visited.has(candidate));
+    if (name === undefined) break;
+    referenced.delete(name);
+    visited.add(name);
+    fetched += 1;
+
+    const asset = await http(main, 'GET', `/admin/assets/${name}`, { key: null });
+    if (asset.status !== 200) {
+      missing.push(`${name} (HTTP ${asset.status})`);
+      continue;
+    }
+
+    const contentType = asset.headers.get('content-type') ?? '';
+    const expected = name.endsWith('.css') ? 'css' : name.endsWith('.js') ? 'javascript' : '';
+    if (expected !== '' && !contentType.includes(expected)) {
+      wrongType.push(`${name} → ${contentType}`);
+    }
+    if (name.endsWith('.js')) collect(asset.body);
+  }
+
+  check('外壳引用了构建产物', visited.size > 0, `0 个引用`);
+  check('全部被引用的产物都能取到', missing.length === 0, missing.slice(0, 5).join(', '));
+  check('产物 content-type 正确', wrongType.length === 0, wrongType.slice(0, 5).join(', '));
+  check(
+    '每个页面都产出了独立 chunk',
+    [...visited].filter((name) => /View-[A-Za-z0-9_-]+\.js$/.test(name)).length >= 9,
+    `视图 chunk: ${[...visited].filter((name) => /View-/.test(name)).length}`,
+  );
+  check(
+    '入口 chunk 存在',
+    [...visited].some((name) => /^index-[A-Za-z0-9_-]+\.js$/.test(name)),
+    [...visited].slice(0, 5).join(', '),
+  );
+  check(
+    '样式表存在',
+    [...visited].some((name) => name.endsWith('.css')),
+  );
+
+  // The classic panel must remain reachable whatever happens to the build.
+  const classic = await http(main, 'GET', '/admin/classic', { key: null });
+  equal('经典面板仍然可用', classic.status, 200);
+
+  // A rebuild that deletes the whole app directory should degrade, not break:
+  // the shell lookup returns null and the server falls back to a 404 from the
+  // router rather than serving a broken page.
+  const unknownAsset = await http(main, 'GET', '/admin/assets/nope-12345678.js', { key: null });
+  equal('缺失产物 → 404（不返回外壳）', unknownAsset.status, 404);
 }
 
 /* ------------------------------------------------------------------ *
@@ -2442,6 +2920,7 @@ async function main(): Promise<void> {
   try {
     await testHttpSurface(main);
     await testAdminAndPanel(main);
+    await testWebUiBundle(main);
     await testOpenAiCompat(main);
     await testAgentStreamAndPersistence(main);
     await testWebSocket(main);
@@ -2457,6 +2936,7 @@ async function main(): Promise<void> {
     await testOneBotConnector();
     await testOneBotTools();
     testConfigHygiene();
+    await testLogsAndConfig();
     await testRateLimitAndLimits();
   } catch (error) {
     failures.push({

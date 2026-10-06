@@ -21,7 +21,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SELF = fileURLToPath(import.meta.url);
@@ -60,7 +60,26 @@ const SKIP_DIRS = new Set([
   '__pycache__',
   '.venv',
   'venv',
+  '.ref-astrbot',
 ]);
+
+/**
+ * Skipped by path rather than by directory name.
+ *
+ * `src/web/app` holds the committed WebUI build: minified vendor bundles whose
+ * contents are not ours to police, and which would otherwise drown the real
+ * findings in false positives. That directory's correctness is covered by the
+ * smoke test instead (assets resolve with exact case, correct content type).
+ *
+ * `webui` is the build-time Vue project — its own toolchain sources, checked by
+ * `vue-tsc`, not by this file.
+ */
+const SKIP_PATHS = new Set(['src/web/app', 'webui/node_modules', 'webui/dist']);
+
+function shouldSkipDir(dir: string): boolean {
+  if (SKIP_DIRS.has(relative(ROOT, dir).split(sep).pop() ?? '')) return true;
+  return SKIP_PATHS.has(relative(ROOT, dir).split(sep).join('/'));
+}
 
 /** Files with no informative extension that still must be LF. */
 const EXACT_TEXT_FILES = new Set([
@@ -79,8 +98,9 @@ const TEXT_EXT = [...CODE_EXT, '.json', '.yaml', '.yml', '.html', '.css', '.md',
 function walk(dir: string, wanted: (name: string) => boolean, out: string[] = []): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) {
-      if (SKIP_DIRS.has(entry.name)) continue;
-      walk(join(dir, entry.name), wanted, out);
+      const child = join(dir, entry.name);
+      if (shouldSkipDir(child)) continue;
+      walk(child, wanted, out);
       continue;
     }
     if (wanted(entry.name)) out.push(join(dir, entry.name));
@@ -120,28 +140,97 @@ function resolvesWithExactCase(fromDir: string, specifier: string): boolean {
   return existsSync(current);
 }
 
-const SPECIFIER = /['"](\.[^'"]*\.(?:ts|js|mjs|cjs|json))['"]/g;
+/** True when `absPath` exists with exactly this casing at every segment. */
+function existsExactCase(absPath: string): boolean {
+  const rel = relative(ROOT, absPath);
+  if (rel.startsWith('..') || isAbsolute(rel)) return false;
+  return resolvesWithExactCase(ROOT, rel.split(sep).join('/'));
+}
+
+/**
+ * Module alias roots.
+ *
+ * The WebUI imports almost everything through `@/…`, so a checker that only
+ * followed `./` specifiers would silently ignore every one of its imports —
+ * which is exactly the blind spot that let a missing `ApiDocsView.vue` pass
+ * `vue-tsc` (`declare module '*.vue'` makes TypeScript accept any `.vue` path).
+ */
+const ALIASES: Array<{ prefix: string; base: string }> = [
+  { prefix: '@/', base: join(ROOT, 'webui', 'src') },
+];
+
+/** Extensions a bundler probes when a specifier has none. */
+const RESOLVE_EXTENSIONS = ['', '.ts', '.tsx', '.vue', '.js', '.mjs', '.json', '.css'];
+
+/**
+ * Resolves a module specifier the way Vite would, then requires exact case.
+ *
+ * @returns 'ok' when it resolves, 'wrong-case' when only a mismatched casing
+ *   exists, or 'missing' when nothing does.
+ */
+function resolveSpecifier(fromDir: string, specifier: string): 'ok' | 'wrong-case' | 'missing' {
+  let baseDir = fromDir;
+  let rest = specifier;
+
+  for (const alias of ALIASES) {
+    if (specifier.startsWith(alias.prefix)) {
+      baseDir = alias.base;
+      rest = specifier.slice(alias.prefix.length);
+      break;
+    }
+  }
+
+  if (!rest.startsWith('.') && !specifier.startsWith('@/')) return 'ok'; // bare package
+
+  const target = resolve(baseDir, rest);
+  const candidates = [
+    ...RESOLVE_EXTENSIONS.map((ext) => `${target}${ext}`),
+    ...RESOLVE_EXTENSIONS.slice(1).map((ext) => join(target, `index${ext}`)),
+  ];
+
+  for (const candidate of candidates) {
+    if (existsExactCase(candidate)) return 'ok';
+  }
+  // Distinguish a casing mistake from a genuinely absent file.
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return 'wrong-case';
+  }
+  return 'missing';
+}
+
+/**
+ * String literals that look like module specifiers.
+ *
+ * Both `./`-relative and `@/`-aliased forms, with or without an extension,
+ * because the WebUI uses extensionless alias imports.
+ */
+const SPECIFIER = /['"]((?:\.{1,2}\/|@\/)[^'"\n]*)['"]/g;
 
 function checkModuleCase(file: string, source: string): void {
   const fromDir = dirname(file);
 
   source.split(/\r?\n/).forEach((text, index) => {
+    // `portability-ok` is honoured here too: a test that deliberately feeds a
+    // path-like string to a validator looks exactly like a broken import.
+    if (SUPPRESS.test(text)) return;
+    const code = text.replace(/\/\/.*$/, '');
     SPECIFIER.lastIndex = 0;
-    let match = SPECIFIER.exec(text);
+    let match = SPECIFIER.exec(code);
     while (match !== null) {
       const specifier = match[1] as string;
-      checks += 1;
-      if (!resolvesWithExactCase(fromDir, specifier)) {
-        const loose = resolve(fromDir, specifier);
-        fail(
-          file,
-          index + 1,
-          existsSync(loose)
-            ? `模块路径大小写不匹配 "${specifier}"（Windows 能解析，Linux 会失败）`
-            : `模块路径不存在 "${specifier}"`,
-        );
+      // Only module-ish specifiers: skip anything with a query/hash or a space.
+      if (/[\s?#]/.test(specifier)) {
+        match = SPECIFIER.exec(code);
+        continue;
       }
-      match = SPECIFIER.exec(text);
+      checks += 1;
+      const verdict = resolveSpecifier(fromDir, specifier);
+      if (verdict === 'wrong-case') {
+        fail(file, index + 1, `模块路径大小写不匹配 "${specifier}"（Windows 能解析，Linux 会失败）`);
+      } else if (verdict === 'missing') {
+        fail(file, index + 1, `模块路径不存在 "${specifier}"`);
+      }
+      match = SPECIFIER.exec(code);
     }
   });
 }
@@ -158,8 +247,9 @@ function collectBasenames(): Set<string> {
     const dir = stack.pop() as string;
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (entry.isDirectory()) {
-        if (SKIP_DIRS.has(entry.name)) continue;
-        stack.push(join(dir, entry.name));
+        const child = join(dir, entry.name);
+        if (shouldSkipDir(child)) continue;
+        stack.push(child);
       } else {
         names.add(entry.name);
       }
@@ -377,6 +467,65 @@ function checkPythonPlugin(): void {
 }
 
 /* ------------------------------------------------------------------ *
+ * WebUI icon registration
+ * ------------------------------------------------------------------ */
+
+/** Placeholder names that appear in prose/comments, never as real props. */
+const ICON_PLACEHOLDERS = new Set(['mdiXxx']);
+
+/**
+ * Every `mdi*` name used in the WebUI must be registered in the generated alias
+ * map.
+ *
+ * This is not a style rule. `plugins/vuetify.ts` uses the `mdi-svg` icon set,
+ * which treats an icon prop as raw SVG path data — so an unregistered name
+ * renders `<path d="mdiSend">`: a blank icon and a console warning, never an
+ * error. Without this check the mistake survives typecheck, build and review.
+ */
+function checkWebUiIcons(): void {
+  const generatedPath = join(ROOT, 'webui', 'src', 'plugins', 'icons.generated.ts');
+  const webuiSrc = join(ROOT, 'webui', 'src');
+  if (!existsSync(generatedPath) || !existsSync(webuiSrc)) return; // WebUI not present
+
+  const generated = readFileSync(generatedPath, 'utf8');
+  const registered = new Set<string>();
+  // Only the alias map entries are unindented single identifiers on their own line.
+  for (const match of generated.matchAll(/^\s{2}(mdi[A-Za-z0-9]+),$/gm)) {
+    registered.add(match[1] as string);
+  }
+  checks += 1;
+  if (registered.size === 0) {
+    fail(generatedPath, 0, 'icons.generated.ts 里没有解析出任何图标，生成器可能坏了');
+    return;
+  }
+
+  const missing = new Map<string, string>(); // icon -> first file that used it
+  for (const file of walk(webuiSrc, (name) => name.endsWith('.vue') || name.endsWith('.ts'))) {
+    if (file === generatedPath) continue;
+    const text = readFileSync(file, 'utf8');
+    // Drop `@mdi/js` import statements so their symbol names are not re-counted.
+    const stripped = text.replace(/import\s*\{[^}]*\}\s*from\s*'@mdi\/js'/g, '');
+    for (const match of stripped.matchAll(/\bmdi[A-Z][A-Za-z0-9]+\b/g)) {
+      const icon = match[0];
+      checks += 1;
+      if (ICON_PLACEHOLDERS.has(icon) || registered.has(icon)) continue;
+      if (!missing.has(icon)) missing.set(icon, relative(ROOT, file));
+    }
+  }
+
+  for (const [icon, file] of missing) {
+    fail(
+      join(ROOT, file),
+      0,
+      `图标 "${icon}" 没有注册（会渲染成空白图标）；运行 npm --prefix webui run icons 重新生成`,
+    );
+  }
+  if (missing.size === 0) {
+    process.stdout.write(`${C.dim}图标：${registered.size} 个已注册，全部用到的名称均已覆盖${C.reset}\n`);
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * Entry point
  * ------------------------------------------------------------------ */
 
@@ -419,6 +568,7 @@ function main(): void {
   checkDockerfile();
   checkPackageJson();
   checkPythonPlugin();
+  checkWebUiIcons();
 
   if (problems.length === 0) {
     process.stdout.write(

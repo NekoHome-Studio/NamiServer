@@ -1,0 +1,27 @@
+{
+  "name": "nami-webui",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Nami 的 WebUI（Vue 3 + Vuetify 3 + Vite）。这是一个构建期包：产物提交到 src/web/app/，因此运行 Nami 本身仍然不需要 npm install。",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "icons": "node scripts/generate-icon-map.mjs",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@mdi/js": "^7.4.47",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0",
+    "vuetify": "^3.7.6"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vite-plugin-vuetify": "^2.0.4",
+    "vue-tsc": "^2.2.0"
+  }
+}

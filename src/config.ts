@@ -172,6 +172,13 @@ export interface Config {
   port: number;
   logLevel: LogLevel;
   logFormat: 'json' | 'pretty';
+  /**
+   * Lowest level buffered for the WebUI log page. Deliberately separate from
+   * `logLevel`: quieting the console should not empty the UI.
+   */
+  logCaptureLevel: LogLevel;
+  /** Ring-buffer size behind the WebUI log page. */
+  logBufferSize: number;
 
   /** Accepted bearer tokens for `/v1/*`. */
   apiKeys: string[];
@@ -186,6 +193,8 @@ export interface Config {
   shutdownGraceMs: number;
 
   dbPath: string;
+  /** Absolute path of the `.env` this process would load, exposed for the editor. */
+  envPath: string;
   agent: AgentConfig;
   llm: LlmConfig;
   ollama: OllamaConfig;
@@ -310,6 +319,14 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
     ? (levelRaw as LogLevel)
     : 'info';
 
+  // `silent` is meaningful for the console but would make the WebUI log page
+  // permanently empty, so it is not accepted as a capture level.
+  const captureRaw = envStr('NAMI_LOG_CAPTURE_LEVEL', 'info').toLowerCase();
+  const logCaptureLevel = ((LOG_LEVELS as readonly string[]).includes(captureRaw) &&
+    captureRaw !== 'silent'
+    ? captureRaw
+    : 'info') as LogLevel;
+
   const extraHeaders: Record<string, string> = {};
   for (const pair of envList('NAMI_LLM_HEADERS')) {
     const eq = pair.indexOf('=');
@@ -347,6 +364,8 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
     port: envInt('NAMI_PORT', 8787, 0),
     logLevel,
     logFormat: envStr('NAMI_LOG_FORMAT', 'pretty') === 'json' ? 'json' : 'pretty',
+    logCaptureLevel,
+    logBufferSize: envInt('NAMI_LOG_BUFFER_SIZE', 1000, 50),
 
     apiKeys,
     adminToken: process.env.NAMI_ADMIN_TOKEN?.trim() || null,
@@ -358,6 +377,10 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
     shutdownGraceMs: envInt('NAMI_SHUTDOWN_GRACE_MS', 8000, 0),
 
     dbPath: envStr('NAMI_DB_PATH', resolve(cwd, 'data', 'nami.sqlite')),
+    // Overridable so tests (and multi-instance setups) never touch the real
+    // `.env`. Note this one is intentionally absent from the config editor:
+    // offering to rewrite the path of the file you are editing is a trap.
+    envPath: resolve(cwd, envStr('NAMI_ENV_PATH', '.env')),
 
     agent: {
       systemPrompt: envStr(

@@ -25,6 +25,14 @@ dist/
 tmp/
 *.tar.gz
 
+# Extracted third-party bundles used only as design reference
+.ref-astrbot/
+
+# WebUI build tooling
+webui/node_modules/
+webui/.npm-cache/
+webui/dist/
+
 # Editor and OS noise
 .DS_Store
 Thumbs.db

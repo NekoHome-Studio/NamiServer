@@ -10,6 +10,7 @@ import type { AppDeps } from './app.ts';
 import { loadConfig, type Config } from './config.ts';
 import { createProvider, ModelRouter, OllamaProvider } from './llm/index.ts';
 import { createLogger, type Logger } from './logger.ts';
+import { LogBus } from './logbus.ts';
 import { Metrics } from './metrics.ts';
 import { OneBotBridge } from './onebot/bridge.ts';
 import { OneBotClient } from './onebot/client.ts';
@@ -35,12 +36,19 @@ export interface BootstrappedServer {
  * actually worked, rather than failing on the first chat request.
  */
 export async function bootstrap(config: Config): Promise<BootstrappedServer> {
+  // The bus must exist before the logger so the very first line is captured.
+  const logs = new LogBus({
+    capacity: config.logBufferSize,
+    captureLevel: config.logCaptureLevel,
+  });
+
   const log = createLogger(
     { scope: 'nami' },
     {
       level: config.logLevel,
       format: config.logFormat,
       color: config.logFormat === 'pretty' && process.stdout.isTTY === true,
+      bus: logs,
     },
   );
 
@@ -155,6 +163,7 @@ export async function bootstrap(config: Config): Promise<BootstrappedServer> {
   const deps: AppDeps = {
     config,
     log,
+    logs,
     store,
     registry,
     provider,

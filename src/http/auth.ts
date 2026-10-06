@@ -102,9 +102,18 @@ export function authenticate(
  * build works whether or not the server has an admin token configured; if only
  * the first header were inspected, the panel would be rejected as soon as an
  * admin token existed.
+ *
+ * @param options.allowQuery Accept `?key=`. Only for endpoints a browser must
+ *   reach with `EventSource`, which cannot set request headers. Everywhere else
+ *   a query credential is refused so keys cannot leak into access logs.
  */
-export function authenticateAdmin(config: Config, req: IncomingMessage, url: URL): AuthInfo {
-  const credentials = readCredentials(req, url, false);
+export function authenticateAdmin(
+  config: Config,
+  req: IncomingMessage,
+  url: URL,
+  options: { allowQuery?: boolean } = {},
+): AuthInfo {
+  const credentials = readCredentials(req, url, options.allowQuery ?? false);
   if (credentials.length === 0) {
     throw new HttpError(
       401,

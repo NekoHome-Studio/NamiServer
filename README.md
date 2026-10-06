@@ -21,6 +21,40 @@
 
 ---
 
+## WebUI 控制台
+
+浏览器打开 **`http://<主机>:8787/admin`**，输入 `NAMI_API_KEYS` 中的任意一个（或 `NAMI_ADMIN_TOKEN`）即可。
+
+十个页面：**登录 · 仪表盘 · 对话 · 会话 · 模型 · 工具 · OneBot/QQ · 配置 · 日志 · API 文档**。
+
+技术上与 [AstrBot 的 dashboard](https://github.com/AstrBotDevs/AstrBot) 同类：**Vue 3 + Vuetify 3 + Vite**，深色为默认主题，MDI 图标走 SVG 路径（可摇树，不下载字体）。
+
+**一个刻意的设计：UI 是构建期依赖，不是运行时依赖。**
+
+```
+webui/                  ← Vue 源码与构建工具链（devDependencies，不进镜像）
+└── ...                    运行 `npm --prefix webui install && npm --prefix webui run build`
+
+src/web/app/            ← 编译产物，已提交进仓库
+└── index.html + assets/   Nami 直接静态托管它
+```
+
+因此 **`npm start` 依然不需要 `npm install`，Dockerfile 依然是单阶段**——镜像里没有 Node 构建工具链，`webui/` 被 `.dockerignore` 排除，`COPY src/` 顺带带走编译好的 bundle。
+
+<details>
+<summary>几个页面值得单独说明</summary>
+
+- **对话**：流式对话，并且把**工具调用循环可视化**——`tool.call` 到达时插入一张可展开的卡片显示工具名、危险等级与参数，`tool.result` 到达时在同一张卡片上补上成功/失败、耗时与返回内容。这是 Nami 与普通聊天界面真正拉开差距的地方。
+- **配置**：从服务器下发的 schema 动态渲染表单，写回 `.env`。三条硬约束：必须显式确认、只允许写 `NAMI_*`、**任一非法值则整体拒绝**（不会部分写入）。密钥永远读不回——只告诉你"已配置"，写入后回显 `***`。**所有字段都需要重启生效**（本服务不做热重载，界面里也这么写）。
+- **日志**：内存环形缓冲 + SSE 实时流，支持 `Last-Event-ID` 断线续传。**日志在进入缓冲前就已完成脱敏**（按字段名递归屏蔽 `token`/`apiKey`/`authorization` 等），因为一旦进了缓冲，下游每个消费者都已经泄露了。`NAMI_LOG_CAPTURE_LEVEL` 与控制台级别独立——把控制台调安静不应该让日志页也空掉。
+- **OneBot/QQ**：除连接状态与网桥计数外，提供一个**同步模拟事件**面板，不需要真实 QQ 账号就能验证整条入站链路，并直接告诉你被哪一步拦下（`no-trigger` / `from-self` / `group-not-allowed` / `busy` …）。
+
+</details>
+
+> 旧版单文件面板保留在 **`/admin/classic`**，既是逃生通道，也是 `src/web/app` 缺失时的自动回退。
+
+---
+
 ## 特性
 
 - **一键接入 Ollama**：`scripts/ollama.ts` 纯走 HTTP（不依赖 `ollama` CLI 是否可用），探测守护进程、列出模型（含参数量/量化/大小/是否已载入显存）、按需拉取并写 `.env`；写入时保留注释与无关配置，可重复执行。
@@ -415,13 +449,30 @@ src/
 │   ├── gateway.ts          # /ws 网关：升级握手、鉴权、消息分发、运行中取消
 │   ├── connection.ts       # 单连接状态机（心跳、分片、关闭）
 │   └── frames.ts           # RFC 6455 帧编解码与握手（手写，零依赖）
+├── logbus.ts               # ★ 日志环形缓冲 + 按字段名递归脱敏
+├── config-schema.ts        # ★ 可编辑配置项的声明式描述（WebUI 表单的唯一来源）
+├── env-file.ts             # .env 读写（接入向导与配置编辑器共用同一实现）
 └── web/
-    ├── panel.ts            # 两个静态页面的读取与兜底
-    ├── panel.html          # 管理面板静态资源（由 GET /admin 内联返回）
-    └── docs.html           # API 参考页（由 GET /docs 返回，前端 fetch /openapi.json）
+    ├── panel.ts            # 经典面板与 API 参考页的读取与兜底
+    ├── panel.html          # 经典单文件面板（GET /admin/classic）
+    ├── docs.html           # API 参考页（GET /docs，前端 fetch /openapi.json）
+    └── app/                # ★ 已提交的 WebUI 编译产物（Vue + Vuetify）
+        ├── index.html
+        └── assets/         # 带哈希的 JS/CSS，命中即长期缓存
+
+webui/                      # ★ WebUI 源码（Vue 3 + Vuetify 3 + Vite）
+├── vite.config.ts          # 产物输出到 ../src/web/app，base 为 /admin/
+└── src/
+    ├── api/client.ts       # 类型化 API 客户端 + SSE 解析（POST 流与 EventSource）
+    ├── composables/        # 凭证、Toast、格式化工具
+    ├── components/         # 共享组件（PageHeader / StatCard / AsyncSection …）
+    ├── plugins/vuetify.ts  # 主题与默认属性
+    └── views/              # 十个页面
 ```
 
-顶层还有 `scripts/smoke.ts`（端到端测试）、`scripts/ollama.ts`（一键接入向导），以及 `integrations/astrbot_plugin_nami/`（独立的 AstrBot 插件，不属于 Nami 的运行时）。
+顶层还有 `scripts/smoke.ts`（端到端测试）、`scripts/check-portability.ts`（跨平台静态检查）、`scripts/ollama.ts`（一键接入向导），以及 `integrations/astrbot_plugin_nami/`（独立的 AstrBot 插件，不属于 Nami 的运行时）。
+
+`webui/` 是**构建期**依赖：它的 `node_modules` 只在你修改界面时才需要，编译产物已提交，因此运行 Nami 仍然零安装。
 
 ### 一次请求都发生了什么
 
@@ -790,6 +841,11 @@ npm test
 
 # AstrBot 插件的离线自检（不需要 AstrBot、不需要联网）
 cd integrations && python selftest_plugin_nami.py
+
+# WebUI：仅在你修改界面时才需要（产物已提交，平时不用管）
+npm run webui:install     # npm --prefix webui install
+npm run webui:dev         # 开发服务器（:5199，自动代理到本机 8787 的 Nami）
+npm run webui:build       # 构建并输出到 src/web/app
 ```
 
 冒烟测试共 **394 项断言**，覆盖全部通道与安全边界。其中：

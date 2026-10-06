@@ -19,11 +19,14 @@ import { Router } from './http/router.ts';
 import type { AuthInfo, RequestContext } from './http/types.ts';
 import { registerAdminRoutes } from './routes/admin.ts';
 import { registerAgentRoutes } from './routes/agent.ts';
+import { registerConfigRoutes } from './routes/config.ts';
 import { registerHealthRoutes } from './routes/health.ts';
+import { registerLogRoutes } from './routes/logs.ts';
 import { registerOneBotRoutes } from './routes/onebot.ts';
 import { registerOpenAiRoutes } from './routes/openai.ts';
 import { registerSessionRoutes } from './routes/sessions.ts';
 import { buildOpenApiDocument } from './openapi.ts';
+import { readAppAsset, readAppIndex } from './web/app.ts';
 import { getDocsHtml, getPanelHtml } from './web/panel.ts';
 import { WebSocketGateway } from './ws/gateway.ts';
 
@@ -43,6 +46,12 @@ function needsAuth(pathname: string): 'api' | 'admin' | null {
   return null;
 }
 
+/**
+ * Admin endpoints a browser reaches with `EventSource`, which cannot set
+ * request headers — so these, and only these, also accept `?key=`.
+ */
+const QUERY_AUTH_ADMIN_PATHS = new Set(['/admin/api/logs/stream']);
+
 export function createNamiServer(deps: AppDeps): NamiServer {
   const { config, log, metrics, limiter } = deps;
 
@@ -53,6 +62,8 @@ export function createNamiServer(deps: AppDeps): NamiServer {
   registerAgentRoutes(router, deps);
   registerSessionRoutes(router, deps);
   registerOneBotRoutes(router, deps);
+  registerLogRoutes(router, deps);
+  registerConfigRoutes(router, deps);
   registerAdminRoutes(router, deps, () => router.describe());
 
   // Pages and the machine-readable spec are all unauthenticated: they contain no
@@ -60,21 +71,73 @@ export function createNamiServer(deps: AppDeps): NamiServer {
   const htmlHeaders = (): Record<string, string> => ({
     'cache-control': 'no-cache',
     'content-security-policy':
-      "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'",
+      "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'",
     'x-content-type-options': 'nosniff',
   });
 
-  const servePanel = (ctx: RequestContext): void => {
+  const serveClassicPanel = (ctx: RequestContext): void => {
     sendText(ctx.res, 200, getPanelHtml(), 'text/html; charset=utf-8', htmlHeaders());
   };
   const serveDocs = (ctx: RequestContext): void => {
     sendText(ctx.res, 200, getDocsHtml(), 'text/html; charset=utf-8', htmlHeaders());
   };
 
-  router.get('/admin', servePanel);
-  router.get('/admin/', servePanel);
+  // The classic single-file panel stays reachable at /admin/classic. It is both
+  // an escape hatch when the SPA misbehaves and the fallback when no WebUI build
+  // is present at all.
+  router.get('/admin/classic', serveClassicPanel);
   router.get('/docs', serveDocs);
   router.get('/docs/', serveDocs);
+
+  /**
+   * Serves the built WebUI and any asset beneath the `/admin` path.
+   *
+   * Handled ahead of the router on purpose: these are static files, not API
+   * routes, and keeping them out of the routing table keeps the OpenAPI drift
+   * check meaningful (every registered route must appear in the spec).
+   *
+   * @returns true when the request was handled here.
+   */
+  function serveWebUi(req: IncomingMessage, res: ServerResponse, url: URL): boolean {
+    const path = url.pathname;
+    if (path !== '/admin' && !path.startsWith('/admin/')) return false;
+    // The API lives under the same prefix and must keep going through the router.
+    if (path.startsWith('/admin/api')) return false;
+    if (path === '/admin/classic') return false;
+
+    const indexHtml = readAppIndex();
+    if (indexHtml === null) return false; // no build: let the router 404
+
+    if (path === '/admin' || path === '/admin/') {
+      sendText(res, 200, indexHtml, 'text/html; charset=utf-8', htmlHeaders());
+      return true;
+    }
+
+    const asset = readAppAsset(path.slice('/admin/'.length));
+    if (asset === null) {
+      // Unknown path under /admin: hand back the shell so hash routing can take
+      // over, rather than a dead end. Only for navigation requests, though —
+      // a missing .js must 404 so the failure is visible.
+      if (/\.[a-z0-9]+$/i.test(path)) {
+        sendError(res, 404, `No such asset: ${path}`, { code: 'not_found' });
+        return true;
+      }
+      sendText(res, 200, indexHtml, 'text/html; charset=utf-8', htmlHeaders());
+      return true;
+    }
+
+    const headers: Record<string, string> = {
+      'content-type': asset.contentType,
+      'x-content-type-options': 'nosniff',
+      'content-length': String(asset.body.length),
+      'cache-control': asset.immutable
+        ? 'public, max-age=31536000, immutable'
+        : 'no-cache',
+    };
+    if (!res.headersSent) res.writeHead(200, headers);
+    res.end(req.method === 'HEAD' ? undefined : asset.body);
+    return true;
+  }
 
   const openApiDocument = buildOpenApiDocument(deps);
   router.get('/openapi.json', (ctx) => {
@@ -148,11 +211,20 @@ export function createNamiServer(deps: AppDeps): NamiServer {
         return;
       }
 
+      // The WebUI and its assets are served ahead of the router and outside the
+      // API auth model: they are public static files.
+      if ((method === 'GET' || method === 'HEAD') && serveWebUi(req, res, url)) {
+        routeLabel = url.pathname.startsWith('/admin/assets/') ? 'webui:asset' : 'webui:page';
+        return;
+      }
+
       const authKind = needsAuth(url.pathname);
       if (authKind === 'api') {
         auth = authenticate(config, req, url);
       } else if (authKind === 'admin') {
-        auth = authenticateAdmin(config, req, url);
+        auth = authenticateAdmin(config, req, url, {
+          allowQuery: QUERY_AUTH_ADMIN_PATHS.has(url.pathname),
+        });
       }
 
       if (authKind !== null && limiter.enabled) {

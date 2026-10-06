@@ -50,3 +50,9 @@ Thumbs.db
 *.md
 .npmrc
 tsconfig.json
+
+# --- WebUI build toolchain ---
+# The compiled WebUI is committed to src/web/app and arrives with `COPY src/`,
+# so the image never needs the Vue/Vite toolchain, its node_modules, or its
+# sources.
+webui

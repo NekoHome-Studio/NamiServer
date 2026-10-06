@@ -4,6 +4,7 @@
 
 import type { Config } from './config.ts';
 import type { Logger } from './logger.ts';
+import type { LogBus } from './logbus.ts';
 import type { LLMProvider } from './llm/types.ts';
 import type { ModelRouter } from './llm/router.ts';
 import type { Metrics } from './metrics.ts';
@@ -16,6 +17,8 @@ import type { ToolRegistry } from './tools/registry.ts';
 export interface AppDeps {
   config: Config;
   log: Logger;
+  /** Ring buffer of recent log entries, tailed by the WebUI. */
+  logs: LogBus;
   store: SessionStore;
   registry: ToolRegistry;
   provider: LLMProvider;

@@ -79,44 +79,12 @@ export function parseArgs(argv: string[]): Args {
 /**
  * Applies `key=value` updates to an existing `.env` body.
  *
- * Existing keys are rewritten in place (preserving comments and ordering); new
- * keys are appended under a marker comment. Returns the new content plus the
- * list of changes, so the caller can report what it touched.
+ * Imported from `src/env-file.ts`, which is the single implementation shared
+ * with the WebUI's config editor so the two cannot drift apart, and re-exported
+ * so tests can reach it from here.
  */
-export function upsertEnv(
-  content: string,
-  updates: Record<string, string>,
-): { content: string; applied: Array<{ key: string; from: string | null; to: string }> } {
-  const lines = content === '' ? [] : content.split(/\r?\n/);
-  const applied: Array<{ key: string; from: string | null; to: string }> = [];
-  const remaining = new Map(Object.entries(updates));
-
-  const rewritten = lines.map((line) => {
-    const match = line.match(/^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/);
-    if (!match) return line;
-    const key = match[2] as string;
-    if (!remaining.has(key)) return line;
-    const next = remaining.get(key) as string;
-    remaining.delete(key);
-    applied.push({ key, from: (match[3] as string).trim(), to: next });
-    return `${match[1]}${key}=${next}`;
-  });
-
-  if (remaining.size > 0) {
-    const additions: string[] = [];
-    if (rewritten.length > 0 && rewritten[rewritten.length - 1]?.trim() !== '') additions.push('');
-    additions.push('# --- added by `npm run ollama` ---');
-    for (const [key, value] of remaining) {
-      additions.push(`${key}=${value}`);
-      applied.push({ key, from: null, to: value });
-    }
-    rewritten.push(...additions);
-  }
-
-  let output = rewritten.join('\n');
-  if (!output.endsWith('\n')) output += '\n';
-  return { content: output, applied };
-}
+import { upsertEnv } from '../src/env-file.ts';
+export { upsertEnv };
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '?';

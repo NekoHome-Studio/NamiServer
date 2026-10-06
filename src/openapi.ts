@@ -228,6 +228,7 @@ export function buildOpenApiDocument(deps: AppDeps): Json {
       { name: 'Agent', description: 'Native agent interface with full event detail.' },
       { name: 'Sessions', description: 'Persisted conversations, transcripts and run history.' },
       { name: 'OneBot', description: 'QQ bridging through SnowLuma or any OneBot v11 implementation.' },
+      { name: 'Logs', description: 'Recent server logs and a live tail, as shown in the WebUI.' },
       { name: 'Admin', description: 'Operational endpoints backing the web panel.' },
       { name: 'Docs', description: 'This document and its human-readable rendering.' },
     ],
@@ -461,10 +462,25 @@ export function buildOpenApiDocument(deps: AppDeps): Json {
       '/admin': {
         get: {
           tags: ['Admin'],
-          summary: 'Web admin panel',
-          description: 'Self-contained HTML. The page itself is unauthenticated; its API calls are not.',
+          summary: 'WebUI 控制台',
+          description:
+            'Vue + Vuetify 单页应用，构建产物提交在 `src/web/app`（因此运行无需安装、无需构建）。前端使用 hash 路由，所以任意 `/admin` 子路径都返回同一份外壳。该路径由服务器在路由分发之前直接处理，不经过 API 鉴权——页面本身不含数据，它调用的 `/admin/api/*` 才需要凭证。',
           security: [],
-          responses: { '200': { description: 'HTML panel.', content: { 'text/html': { schema: { type: 'string' } } } } },
+          responses: {
+            '200': { description: 'HTML shell.', content: { 'text/html': { schema: { type: 'string' } } } },
+          },
+        },
+      },
+      '/admin/classic': {
+        get: {
+          tags: ['Admin'],
+          summary: '经典单文件面板（逃生通道）',
+          description:
+            '不依赖前端构建的旧版面板。当 `src/web/app` 缺失时，`/admin` 也会自动回退到它。',
+          security: [],
+          responses: {
+            '200': { description: 'HTML panel.', content: { 'text/html': { schema: { type: 'string' } } } },
+          },
         },
       },
       '/onebot/event': {
@@ -580,6 +596,57 @@ export function buildOpenApiDocument(deps: AppDeps): Json {
           },
         },
       },
+      '/admin/api/logs': {
+        get: {
+          tags: ['Logs'],
+          summary: 'Recent log entries',
+          description:
+            'Reads the in-memory ring buffer. Credentials are redacted on the way in, so they cannot appear here.',
+          parameters: [
+            { name: 'limit', in: 'query', schema: { type: 'integer', default: 200, maximum: 1000 } },
+            {
+              name: 'level',
+              in: 'query',
+              schema: { type: 'string', enum: ['debug', 'info', 'warn', 'error'] },
+              description: 'Only return entries at or above this level. Defaults to the capture level.',
+            },
+          ],
+          responses: {
+            '200': jsonResponse('Entries plus buffer metadata.', { type: 'object' }),
+            '400': errorResponse('Unknown level.'),
+          },
+        },
+        delete: {
+          tags: ['Logs'],
+          summary: 'Clear the log buffer',
+          responses: { '200': jsonResponse('How many entries were cleared.', { type: 'object' }) },
+        },
+      },
+      '/admin/api/logs/stream': {
+        get: {
+          tags: ['Logs'],
+          summary: 'Live log tail (SSE)',
+          description: [
+            'Server-Sent Events stream of `log` events. Each frame carries the entry as JSON and',
+            'its `seq` as the SSE event id, so a reconnecting `EventSource` resumes via',
+            '`Last-Event-ID` (or `?since=`) without gaps or duplicates.',
+          ].join('\n'),
+          parameters: [
+            {
+              name: 'level',
+              in: 'query',
+              schema: { type: 'string', enum: ['debug', 'info', 'warn', 'error'] },
+            },
+            {
+              name: 'since',
+              in: 'query',
+              schema: { type: 'integer' },
+              description: 'Resume after this sequence number.',
+            },
+          ],
+          responses: { '200': { description: 'SSE stream.', content: { 'text/event-stream': { schema: { type: 'string' } } } } },
+        },
+      },
       '/admin/api/overview': {
         get: {
           tags: ['Admin'],
@@ -666,8 +733,56 @@ export function buildOpenApiDocument(deps: AppDeps): Json {
       '/admin/api/config': {
         get: {
           tags: ['Admin'],
-          summary: 'Effective configuration (secrets redacted)',
+          summary: '生效中的配置（密钥已脱敏）',
+          description: '只读快照。要编辑请用 `GET /admin/api/config/schema` 取字段描述，再 `PUT` 写回。',
           responses: { '200': jsonResponse('Configuration with keys replaced by booleans.', { type: 'object' }) },
+        },
+        put: {
+          tags: ['Admin'],
+          summary: '写入配置到 .env',
+          description: [
+            '写入 `.env`，保留注释与无关配置，可重复执行。三条硬性约束：',
+            '',
+            '- 必须携带 `confirm: true`，避免误写的请求体悄悄改掉运行环境；',
+            '- 只允许写 `NAMI_*` 键；',
+            '- 值按字段类型校验，**任一非法则整体拒绝**，不会部分写入。',
+            '',
+            '**不做热重载**：所有字段都标记为 `restartRequired`，必须重启 Nami 才生效。',
+            '密钥的新值在响应里以 `***` 回显——接口永远不会把密钥原文吐出来，也永远读不回它。',
+          ].join('\n'),
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['changes', 'confirm'],
+                  properties: {
+                    changes: {
+                      type: 'object',
+                      additionalProperties: { type: ['string', 'number', 'boolean'] },
+                      description: '键为 NAMI_* 环境变量名，值为新值（列表用逗号分隔）。',
+                    },
+                    confirm: { type: 'boolean', const: true, description: '显式确认。' },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': jsonResponse('写入结果与被改动的键（密钥值以 *** 代替）。', { type: 'object' }),
+            '400': errorResponse('缺少确认、键非法或值未通过校验（此时不会写入任何内容）。'),
+            '500': errorResponse('.env 不可写。'),
+          },
+        },
+      },
+      '/admin/api/config/schema': {
+        get: {
+          tags: ['Admin'],
+          summary: '可编辑配置项的完整描述',
+          description:
+            '每一项的类型、分组、说明、可选值与当前生效值，外加 `.env` 文件路径与可写性。密钥类配置项的值恒为 `null`，只给出 `configured` 布尔。',
+          responses: { '200': jsonResponse('字段列表与 .env 文件信息。', { type: 'object' }) },
         },
       },
       '/admin/api/routes': {
