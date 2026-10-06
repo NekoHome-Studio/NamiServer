@@ -13,6 +13,11 @@ Nami 是一个自托管的 AI Agent 服务器载体（Node.js + TypeScript，**�
 > ⚠️ **它从未在 Linux 上运行过，Docker 镜像也从未构建过。**
 > 所有验证都发生在 Windows + Node 24.13.1 上。Linux 相关的结论来自**静态检查**，不是实机运行。
 
+> 📦 **关于 Docker 的一处刻意偏离**：原计划为 WebUI 改多阶段构建，但最终**不需要**——
+> Vue/Vuetify 的编译产物已提交在 `src/web/app`，`COPY src/` 就把它带进镜像了，
+> `webui/`（源码与 node_modules）由 `.dockerignore` 排除。于是镜像里没有 Node 构建工具链，
+> Dockerfile 保持单阶段，`npm start` 也依然零安装。这比多阶段构建更简单，且性质相同。
+
 这不是谦虚，是交接时最需要知道的一件事。第 2 节把它拆成了表。
 
 ---
@@ -74,6 +79,9 @@ curl -s localhost:8787/healthz
 | OneBot 真实 QQ | 真实 SnowLuma + QQ | ❌ **未验证** | ❌ | 需要 Windows 上跑 NTQQ，本机未部署 |
 | AstrBot 插件被真实 AstrBot 加载 | WebUI 里加载 | ❌ **未验证** | ❌ | 环境没有 AstrBot；正确性基于桩 API + 官方文档 |
 | 管理面板视觉/交互 | 浏览器 | ❌ **未目视检查** | ❌ | 只做了 JS 语法检查 + 端点一致性核对 |
+| **WebUI 构建（`vite build`）** | `npm --prefix webui run build` | ✅ 成功 | ⚠️ 推断可行 | Vite 本身跨平台；产物已提交，Linux 上**不需要**重新构建 |
+| **WebUI 运行时（浏览器）** | 实际点击每个页面 | ❌ **从未运行** | ❌ | 无浏览器环境；类型检查通过、SFC 编译通过、产物引用图完整，但**没有人真正打开过这些页面** |
+| **WebUI 图标渲染** | 产物内 SVG 路径核对 | ✅ 已验证 | ⚠️ 推断 | 曾在产物中确认 `mdiSend` 的真实路径存在、裸 `mdi*` 字符串为 0；视觉未见 |
 
 ### 已经静态排除的 Linux 风险
 
