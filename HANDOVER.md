@@ -262,11 +262,91 @@ grep -rlU $'\r' --include='*.ts' --include='*.py' --include='Dockerfile' . | hea
 npm test
 ```
 
-或者用 git（`.gitattributes` 已配置 `eol=lf`，clone 出来就是 LF）：
+或者用 git —— **仓库已经在本地初始化并提交好了**（见第 10 节），不需要再 `git init`：
 
 ```bash
-git init && git add -A && git commit -m "handover"
-# 推到远端后在 Linux 上 clone
+# 在 Linux 机器上
+git clone <你的远端地址> nami && cd nami
+# 若还没推送，也可以直接从开发机拷贝这个已提交的仓库目录（含 .git/）
 ```
 
 > `.gitattributes` 里的 `* text=auto eol=lf` 是为了防止这件事：Windows 上 `core.autocrlf=true` 会把 CRLF 检出回来，而 CRLF 会破坏 Dockerfile、shebang 和 `.env` 解析。Nami 的 `envStr()` 已经会 `trim()` 掉值里的 `\r`（因为 Docker Compose 的 `env_file` 用自己的解析器，不像 Node 的 `loadEnvFile` 那样剥 `\r`），但换行符统一仍然应该做对。
+
+---
+
+## 10. 推送到 GitHub —— 本地已就绪，但本环境推不出去
+
+### 现状
+
+仓库**已在本地初始化并提交完毕**，只差一次 `git push`：
+
+```bash
+# 已经做好的部分
+git init -b main                          # ✅
+git add -A && git commit                  # ✅ 72038d6，78 个文件，21287 行
+git remote add origin \
+  https://github.com/NekoHome-Studio/Namiserver.git   # ✅
+```
+
+| 检查项 | 结果 |
+| --- | --- |
+| 提交是否干净 | ✅ `git status` 无未跟踪/未提交内容 |
+| `node_modules` / `.npm-cache` / `data` / `dist` 是否被误提交 | ✅ 均已被 `.gitignore` 排除 |
+| 提交内容是否全为 LF | ✅ 78/78（`.gitattributes` 已锁定） |
+| 是否含密钥/token | ✅ 无。已扫描 `sk-` / `ghp_` / `github_pat_` / `AKIA` / 私钥头，唯一命中是 README 里的占位符 `sk-xxxxxxxxxxxxxxxx` |
+| 是否含个人路径（`C:\Users\...`） | ✅ 无 |
+| 是否含真实 API Key | ✅ 无（运行时才生成，不落盘） |
+
+### 为什么我推不出去
+
+两条独立的阻塞，都已实测确认，不是推测：
+
+1. **HTTPS 出网被沙箱按域名过滤。** 实测 `git push` 报
+   `Failed to connect to github.com port 443 after 21081 ms`（curl 访问 `github.com` 与 `example.com` 同样返回 `000`，而 `registry.npmjs.org` 可通）。
+   **即便提供了 token 也推不上去。**
+2. **本机没有任何可用凭证**：`~/.ssh` 里只有 `known_hosts`、无私钥；没有 `gh` CLI；环境里没有 `GITHUB_TOKEN`/`GH_TOKEN`；没有存储的 GCM 凭证。
+
+> 有意思的是 **SSH 通道是通的**：`ssh -T -p 443 git@ssh.github.com` 拿到了 GitHub 真实的 `Permission denied (publickey)` 响应（说明握手成功，只是没有密钥）。所以如果你在 GitHub 上配了 SSH key，这条路可行。
+
+### 你需要执行的（在你的终端里，不是通过 DSH 沙箱）
+
+```bash
+cd <本仓库目录>
+
+# 1) 确认远端仓库已存在；若不存在先在 GitHub 上建一个空仓库
+#    https://github.com/organizations/NekoHome-Studio/repositories/new
+#    注意：不要勾选 "Add a README"，否则会产生一次无关的合并
+
+# 2) 推送（Git Credential Manager 会弹一次浏览器登录）
+git push -u origin main
+```
+
+若走 SSH：
+
+```bash
+# 前提：已在本机生成 SSH key 并加到 GitHub 账号
+git remote set-url origin git@github.com:NekoHome-Studio/Namiserver.git
+# 如果 22 端口被封，改用 GitHub 的 443 端点：
+#   ~/.ssh/config 里加：
+#     Host github.com
+#       HostName ssh.github.com
+#       Port 443
+#       User git
+git push -u origin main
+```
+
+### 权限提醒
+
+远端归属是 **`NekoHome-Studio` 组织**，而本机 git 身份是 `qyac`。
+`qyac` 必须对该组织仓库有 **write 权限**，否则会收到 `403`。若组织启用了 SSO，token 还需额外授权该组织。
+
+### 推送后建议
+
+```bash
+# 确认远端内容与本地一致
+git ls-remote --heads origin
+git log origin/main --oneline -1
+```
+
+然后在**真正的 Linux 机器**上 clone 一份，跑第 1 节的验收清单——那才是这次交接的终点。
+
