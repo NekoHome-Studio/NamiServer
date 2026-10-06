@@ -421,6 +421,20 @@ export class ApiError extends Error {
 
 const STORAGE_KEY = 'nami.credential';
 
+/** State of the in-place reload, mirrored from `GET /admin/api/restart`. */
+export interface RestartStatus {
+  restarting: boolean;
+  hotReload: boolean;
+  available: boolean;
+  last: {
+    at: number;
+    reason: string;
+    ok: boolean;
+    addressChanged: boolean;
+    error?: string;
+  } | null;
+}
+
 /** Who the server says we are. Mirrors `GET /admin/api/auth/me`. */
 export interface SessionState {
   authenticated: boolean;
@@ -659,6 +673,20 @@ export class NamiClient {
 
   health(): Promise<HealthResponse> {
     return this.get('/healthz');
+  }
+
+  /**
+   * Asks the server to rebuild itself from `.env`.
+   *
+   * Answers `202` before the reload starts, so rejection here means the request
+   * never queued; the outcome is read back with {@link restartStatus}.
+   */
+  requestRestart(reason: string): Promise<{ scheduled: boolean; at: number }> {
+    return this.json('/admin/api/restart', 'POST', { reason });
+  }
+
+  restartStatus(): Promise<RestartStatus> {
+    return this.get('/admin/api/restart');
   }
 
   readyz(): Promise<ReadyzResponse> {

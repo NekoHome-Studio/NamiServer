@@ -10,11 +10,12 @@
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, isAbsolute, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootstrap, type BootstrappedServer } from '../src/index.ts';
+import { Lifecycle, lastReloadResult } from '../src/lifecycle.ts';
 import { loadConfig, type Config } from '../src/config.ts';
 import type { AgentEventMap } from '../src/core/types.ts';
 import { computeAcceptKey, encodeFrame, OPCODE, FrameParser, unmask } from '../src/ws/frames.ts';
@@ -3304,6 +3305,180 @@ async function testConsoleAccounts(): Promise<void> {
   );
 }
 
+/**
+ * Configuration hot reload and in-place restart.
+ *
+ * Drives the real `Lifecycle` against a real `.env` in a temp directory, because
+ * the properties that matter cannot be checked by reading the code:
+ *
+ *   * an edit is actually picked up (the first `loadConfig` fills `process.env`
+ *     and a naive second read would keep the old value forever);
+ *   * the listener survives the swap on the same address;
+ *   * **a broken configuration is refused and the running instance keeps
+ *     serving** — the whole reason the replacement is built before the swap.
+ */
+async function testHotReload(): Promise<void> {
+  section('配置热重载与原地重启');
+
+  const dir = join(DATA_DIR, `reload-${process.pid}`);
+  mkdirSync(dir, { recursive: true });
+  const envPath = join(dir, '.env');
+  const port = await freePort();
+
+  const writeEnv = (rounds: number, extra: Record<string, string> = {}): void => {
+    const lines = [
+      `NAMI_DB_PATH=${join(dir, 'reload.sqlite')}`,
+      `NAMI_PORT=${port}`,
+      'NAMI_HOST=127.0.0.1',
+      'NAMI_LLM_PROVIDER=mock',
+      `NAMI_API_KEYS=${API_KEY}`,
+      'NAMI_ADMIN_PASSWORD=reload-password-123',
+      `NAMI_MAX_TOOL_ROUNDS=${rounds}`,
+      ...Object.entries(extra).map(([key, value]) => `${key}=${value}`),
+    ];
+    writeFileSync(envPath, `${lines.join('\n')}\n`);
+  };
+
+  /*
+   * Always `reload: true`, even for the first read.
+   *
+   * This process has already run many fixtures, and each one left its `NAMI_*`
+   * values in `process.env`; a plain load only *fills* missing keys, so it would
+   * silently adopt the previous fixture's port instead of this file's. Reload
+   * mode discards exactly those injected values — which is also what makes the
+   * second read below see the edit.
+   */
+  const load = (): Config => loadConfig({ cwd: dir, reload: true });
+
+  writeEnv(2);
+  const firstConfig = load();
+  const firstApp = await bootstrap(firstConfig);
+  started.push(firstApp);
+
+  const lifecycle = new Lifecycle(
+    { config: firstConfig, app: firstApp },
+    {
+      boot: (config, seedLogs, startedAt) =>
+        bootstrap(config, {
+          ...(seedLogs === undefined ? {} : { seedLogs }),
+          ...(startedAt === undefined ? {} : { startedAt }),
+        }),
+      load: () => load(),
+    },
+  );
+  firstApp.deps.restart = (reason: string) => lifecycle.restart(reason);
+  await lifecycle.start();
+
+  const base = `http://127.0.0.1:${port}`;
+  equal('重载前 maxRounds = 2', lifecycle.current().config.agent.maxRounds, 2);
+  equal('实例已在监听', (await fetchText(`${base}/healthz`)).status, 200);
+
+  /* ------------------------- an edit is picked up ------------------------- */
+
+  writeEnv(5);
+  const reloaded = await lifecycle.restart('smoke-test');
+  equal('重载成功', reloaded.ok, true);
+  equal('地址未变，无需重绑', reloaded.addressChanged, false);
+  equal('新的 maxRounds 已生效', lifecycle.current().config.agent.maxRounds, 5);
+  equal('同一个地址仍在服务', (await fetchText(`${base}/healthz`)).status, 200);
+  const lastOk = lastReloadResult();
+  equal('记录了这次成功的重载', lastOk?.ok, true);
+  equal(
+    '「进程运行时长」跨重载保持（实例重建不等于进程重启）',
+    lifecycle.current().app.deps.startedAt,
+    firstApp.deps.startedAt,
+  );
+  equal('记录里的原因', lastOk?.reason, 'smoke-test');
+  // A closed store throws on use, which is the observable proof that the old
+  // instance really was torn down rather than left holding the database.
+  let oldStoreClosed = false;
+  try {
+    firstApp.store.counts();
+  } catch {
+    oldStoreClosed = true;
+  }
+  check('旧实例的库连接已关闭', oldStoreClosed);
+
+  /* ------------------- a broken config must not take it down ------------------- */
+
+  /*
+   * A database path whose parent is a regular file: `openDatabase` fails with
+   * ENOTDIR while creating the directory, so the replacement cannot be built.
+   * Deliberately a path *inside* the workspace — pointing at /proc would be
+   * intercepted by the file sandbox rather than failing on its own.
+   */
+  const blocker = join(dir, 'not-a-directory');
+  writeFileSync(blocker, 'this is a file, not a directory\n');
+  writeEnv(5, { NAMI_DB_PATH: join(blocker, 'nami.sqlite') });
+  const refused = await lifecycle.restart('broken-config');
+  equal('损坏的配置被拒绝', refused.ok, false);
+  check('拒绝原因非空', (refused.error ?? '') !== '', refused.error ?? '');
+  equal('拒绝后旧实例仍在服务', (await fetchText(`${base}/healthz`)).status, 200);
+  equal('拒绝后配置未被替换', lifecycle.current().config.agent.maxRounds, 5);
+  equal('记录了这次失败的重载', lastReloadResult()?.ok, false);
+
+  // Put a good config back so the HTTP route test below reloads successfully.
+  writeEnv(7);
+
+  /* ---------------------------- the HTTP route ---------------------------- */
+
+  const scheduled = await fetchText(`${base}/admin/api/restart`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${API_KEY}` },
+    body: JSON.stringify({ reason: 'from-smoke' }),
+  });
+  equal('POST /admin/api/restart → 202', scheduled.status, 202);
+
+  // The handler waits 200ms, then reloads; poll for the outcome.
+  let applied = false;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    if (lifecycle.current().config.agent.maxRounds === 7) {
+      applied = true;
+      break;
+    }
+  }
+  check('端点触发的重载最终生效', applied);
+  equal('重载后服务仍可用', (await fetchText(`${base}/healthz`)).status, 200);
+
+  const status = await fetchText(`${base}/admin/api/restart`, {
+    headers: { authorization: `Bearer ${API_KEY}` },
+  });
+  equal('GET /admin/api/restart → 200', status.status, 200);
+  const statusJson = status.json as { restarting?: boolean; available?: boolean; last?: { reason?: string } };
+  equal('状态显示重载器可用', statusJson.available, true);
+  equal('状态未停留在「进行中」', statusJson.restarting, false);
+  equal('状态报告了最后一次原因', statusJson.last?.reason, 'from-smoke');
+
+  await lifecycle.stop();
+}
+
+/** Binds an ephemeral port and returns it, so the fixture does not collide. */
+async function freePort(): Promise<number> {
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', () => resolve()));
+  const address = probe.address();
+  const port = address !== null && typeof address !== 'string' ? address.port : 0;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  return port;
+}
+
+/** Minimal fetch wrapper returning status and parsed JSON. */
+async function fetchText(
+  url: string,
+  init?: RequestInit,
+): Promise<{ status: number; body: string; json: unknown }> {
+  const response = await fetch(url, init);
+  const body = await response.text();
+  let json: unknown = undefined;
+  try {
+    json = body === '' ? undefined : JSON.parse(body);
+  } catch {
+    json = undefined;
+  }
+  return { status: response.status, body, json };
+}
+
 /* ------------------------------------------------------------------ *
  * Entry point
  * ------------------------------------------------------------------ */
@@ -3339,6 +3514,7 @@ async function main(): Promise<void> {
     await testLogsAndConfig();
     await testRateLimitAndLimits();
     await testConsoleAccounts();
+    await testHotReload();
   } catch (error) {
     failures.push({
       name: 'unexpected exception',

@@ -6,15 +6,19 @@
  * shutdown.
  */
 
+import { createHash } from 'node:crypto';
+import { readFileSync, watch, type FSWatcher } from 'node:fs';
+import { basename, dirname } from 'node:path';
 import type { AppDeps } from './app.ts';
 import { seedConsoleAccount } from './auth/bootstrap.ts';
 import { loadConfig, type Config } from './config.ts';
 import { createProvider, ModelRouter, OllamaProvider } from './llm/index.ts';
 import { createLogger, type Logger } from './logger.ts';
-import { LogBus } from './logbus.ts';
+import { LogBus, type LogEntry } from './logbus.ts';
 import { Metrics } from './metrics.ts';
 import { OneBotBridge } from './onebot/bridge.ts';
 import { OneBotClient } from './onebot/client.ts';
+import { Lifecycle, type Instance } from './lifecycle.ts';
 import { RateLimiter } from './ratelimit.ts';
 import { createNamiServer, type NamiServer } from './server.ts';
 import { openDatabase } from './store/db.ts';
@@ -29,6 +33,24 @@ export interface BootstrappedServer {
   shutdown(): Promise<void>;
 }
 
+export interface BootstrapOptions {
+  /**
+   * Log entries carried over from the instance being replaced.
+   *
+   * Only a hot reload passes this, so the console's log page shows the reload
+   * itself rather than going blank at the moment it is most interesting.
+   */
+  seedLogs?: LogEntry[];
+  /**
+   * Process start time, carried across a reload.
+   *
+   * `deps.startedAt` feeds the health endpoint, the metrics snapshot and the
+   * console's "运行 Ns" footer. Rebuilding the instance must not make a
+   * three-day-old process look like it just booted.
+   */
+  startedAt?: number;
+}
+
 /**
  * Wires every layer together without starting the listener.
  *
@@ -36,11 +58,15 @@ export interface BootstrappedServer {
  * Ollama setup is only convincing if the boot log says whether the connection
  * actually worked, rather than failing on the first chat request.
  */
-export async function bootstrap(config: Config): Promise<BootstrappedServer> {
+export async function bootstrap(
+  config: Config,
+  options: BootstrapOptions = {},
+): Promise<BootstrappedServer> {
   // The bus must exist before the logger so the very first line is captured.
   const logs = new LogBus({
     capacity: config.logBufferSize,
     captureLevel: config.logCaptureLevel,
+    ...(options.seedLogs !== undefined ? { seed: options.seedLogs } : {}),
   });
 
   const log = createLogger(
@@ -178,7 +204,7 @@ export async function bootstrap(config: Config): Promise<BootstrappedServer> {
     onebotClient,
     onebotBridge,
     consoleAccount,
-    startedAt: Date.now(),
+    startedAt: options.startedAt ?? Date.now(),
   };
 
   const nami = createNamiServer(deps);
@@ -208,28 +234,110 @@ export async function bootstrap(config: Config): Promise<BootstrappedServer> {
 }
 
 async function main(): Promise<void> {
-  const config = loadConfig();
-  const { deps, nami, shutdown } = await bootstrap(config);
-  const { log, store } = deps;
+  const firstConfig = loadConfig();
+  const firstApp = await bootstrap(firstConfig);
+  const log = firstApp.deps.log;
 
-  await new Promise<void>((resolve, reject) => {
-    nami.server.once('error', reject);
-    nami.server.listen(config.port, config.host, () => {
-      nami.server.removeListener('error', reject);
-      resolve();
-    });
-  }).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === 'EADDRINUSE') {
-      log.error(`port ${config.port} is already in use`, {
+  const lifecycle = new Lifecycle(
+    { config: firstConfig, app: firstApp },
+    {
+      boot: (config, seedLogs, startedAt) =>
+        bootstrap(config, {
+          ...(seedLogs === undefined ? {} : { seedLogs }),
+          ...(startedAt === undefined ? {} : { startedAt }),
+        }),
+      load: (options) => loadConfig(options ?? {}),
+      // Re-arm the watcher against the instance that is now serving, since
+      // NAMI_ENV_PATH (and NAMI_HOT_RELOAD) can themselves change.
+      onReload: (instance) => armEnvWatcher(instance),
+    },
+  );
+  firstApp.deps.restart = (reason: string) => lifecycle.restart(reason);
+
+  try {
+    await lifecycle.start();
+  } catch (error) {
+    const failure = error as NodeJS.ErrnoException;
+    if (failure.code === 'EADDRINUSE') {
+      log.error(`port ${firstConfig.port} is already in use`, {
         hint: 'set NAMI_PORT to a free port, or stop the process using it',
       });
     } else {
-      log.error('failed to start the listener', { error: error.message, code: error.code });
+      log.error('failed to start the listener', {
+        error: failure.message,
+        code: failure.code,
+      });
     }
     process.exit(1);
-  });
+  }
 
-  printBanner(config, deps);
+  printBanner(firstConfig, firstApp.deps);
+
+  /* ------------------------- .env hot reload ------------------------- */
+
+  let watcher: FSWatcher | undefined;
+  let debounce: NodeJS.Timeout | undefined;
+  /** Digest of the file as of the last reload, to ignore touches and partial writes. */
+  let digest = '';
+
+  /** Content hash, or '' when the file is unreadable. */
+  const hashFile = (path: string): string => {
+    try {
+      return createHash('sha256').update(readFileSync(path)).digest('hex');
+    } catch {
+      return '';
+    }
+  };
+
+  /**
+   * Watches `.env` and reloads when its contents actually change.
+   *
+   * The *directory* is watched, not the file: editors and `writeFileSync` either
+   * replace the inode or truncate-then-write, both of which stop a file watch
+   * from firing again. The content hash then filters out the events that are not
+   * a real edit (a touch, a partial write, or the second event of a save).
+   */
+  function armEnvWatcher(instance: Instance): void {
+    watcher?.close();
+    watcher = undefined;
+    clearTimeout(debounce);
+
+    const file = instance.config.envPath;
+    digest = hashFile(file);
+    if (!instance.config.hotReload) {
+      instance.app.deps.log.info('hot reload is off; .env changes need a manual restart', {
+        env: file,
+      });
+      return;
+    }
+
+    try {
+      watcher = watch(dirname(file), (_event, changed) => {
+        if (changed !== null && changed !== basename(file)) return;
+        clearTimeout(debounce);
+        debounce = setTimeout(() => {
+          const next = hashFile(file);
+          if (next === '' || next === digest) return;
+          digest = next;
+          instance.app.deps.log.info('.env changed on disk; reloading', { env: file });
+          void lifecycle.restart('env-file-changed');
+        }, 250);
+      });
+    } catch (error) {
+      instance.app.deps.log.warn('cannot watch .env for changes; reload manually', {
+        env: file,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    // Watching must never be the reason the process stays alive.
+    watcher.unref?.();
+    instance.app.deps.log.debug?.('watching .env for changes', { env: file });
+  }
+
+  armEnvWatcher(lifecycle.current());
+
+  /* ---------------------------- shutdown ---------------------------- */
 
   let shuttingDown = false;
   const onSignal = (signal: string): void => {
@@ -238,12 +346,13 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     shuttingDown = true;
-    log.info('shutting down', { signal, graceMs: config.shutdownGraceMs });
+    const active = lifecycle.current();
+    log.info('shutting down', { signal, graceMs: active.config.shutdownGraceMs });
 
     const force = setTimeout(() => {
       log.warn('graceful shutdown timed out, forcing exit');
       process.exit(1);
-    }, config.shutdownGraceMs);
+    }, active.config.shutdownGraceMs);
     force.unref();
 
     /*
@@ -259,12 +368,14 @@ async function main(): Promise<void> {
      */
     let sessions: number | null = null;
     try {
-      sessions = store.counts().sessions;
+      sessions = active.app.store.counts().sessions;
     } catch {
       sessions = null;
     }
 
-    void shutdown()
+    watcher?.close();
+    void lifecycle
+      .stop()
       .then(() => {
         clearTimeout(force);
         log.info('shutdown complete', { sessions });
@@ -290,7 +401,10 @@ async function main(): Promise<void> {
 
   process.on('uncaughtException', (error) => {
     log.error('uncaught exception, shutting down', { error: error.message, stack: error.stack });
-    void shutdown().finally(() => process.exit(1));
+    void lifecycle
+      .stop()
+      .catch(() => undefined)
+      .finally(() => process.exit(1));
   });
 }
 

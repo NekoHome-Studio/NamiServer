@@ -230,6 +230,15 @@ export interface Config {
   requestTimeoutMs: number;
   shutdownGraceMs: number;
 
+  /**
+   * Watch `.env` and rebuild the server in place when it changes.
+   *
+   * On by default: the console's config editor writes `.env`, and having to then
+   * find a shell to restart the process is the kind of friction that leads to
+   * hand-edited files and forgotten restarts.
+   */
+  hotReload: boolean;
+
   dbPath: string;
   /** Absolute path of the `.env` this process would load, exposed for the editor. */
   envPath: string;
@@ -333,19 +342,64 @@ function envList(key: string): string[] {
 export interface LoadConfigOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Re-read `.env`, discarding the values a previous load took from it.
+   *
+   * Needed for hot reload. `.env` loading only *fills* `process.env` — it never
+   * overwrites an entry — so without this a second load would keep the first
+   * file's values forever and an edit would appear to do nothing.
+   *
+   * Values that came from the real environment (Docker `-e`, a shell export) are
+   * kept and still win, exactly as they did on the first load.
+   */
+  reload?: boolean;
+}
+
+/**
+ * `process.env` as it was before Nami read any `.env`.
+ *
+ * The difference between this and the current environment is precisely "what the
+ * `.env` file put there", which is what a reload has to undo.
+ */
+let pristineEnv: Record<string, string> | undefined;
+
+function rememberPristineEnv(): void {
+  pristineEnv ??= { ...process.env } as Record<string, string>;
+}
+
+/** Drops the keys a previous `.env` load injected, so the file can be re-read. */
+function forgetInjectedEnv(): void {
+  if (pristineEnv === undefined) return;
+  for (const key of Object.keys(process.env)) {
+    if (!key.startsWith('NAMI_')) continue;
+    if (key in pristineEnv) continue;
+    delete process.env[key];
+  }
 }
 
 /**
  * Resolves the full configuration.
  *
- * Note: this **writes** into `process.env` (that is how `.env` loading works)
- * and never clears keys it did not set. Call it once per process; a second call
- * with a different `env` will still see values from the first. Tests should
- * clear their own `NAMI_*` keys between fixtures.
+ * Note: this **writes** into `process.env` (that is how `.env` loading works).
+ * The first call snapshots the pre-existing environment; later calls pass
+ * `reload: true` to discard what the previous `.env` supplied and read the file
+ * again, which is what `POST /admin/api/restart` and the `.env` watcher do.
  */
 export function loadConfig(options: LoadConfigOptions = {}): Config {
   const cwd = options.cwd ?? process.cwd();
-  if (!options.env) loadDotEnv(cwd);
+
+  /*
+   * Snapshot before touching anything, including the `env` option: the snapshot
+   * means "the environment before Nami influenced it", so it must not be taken
+   * after a previous call has already written `NAMI_*` values in. Otherwise a
+   * reload would treat those as pre-existing and refuse to overwrite them.
+   */
+  rememberPristineEnv();
+
+  if (!options.env) {
+    if (options.reload === true) forgetInjectedEnv();
+    loadDotEnv(cwd);
+  }
   if (options.env) {
     for (const [key, value] of Object.entries(options.env)) {
       if (value !== undefined) process.env[key] = value;
@@ -434,6 +488,7 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
     maxBodyBytes: envInt('NAMI_MAX_BODY_BYTES', 1_048_576, 1024),
     requestTimeoutMs: envInt('NAMI_REQUEST_TIMEOUT_MS', 120_000, 1000),
     shutdownGraceMs: envInt('NAMI_SHUTDOWN_GRACE_MS', 8000, 0),
+    hotReload: envBool('NAMI_HOT_RELOAD', true),
 
     dbPath: envStr('NAMI_DB_PATH', resolve(cwd, 'data', 'nami.sqlite')),
     // Overridable so tests (and multi-instance setups) never touch the real

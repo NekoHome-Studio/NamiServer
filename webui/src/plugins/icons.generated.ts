@@ -27,14 +27,14 @@ import { mdiAccessPoint, mdiAccountCheckOutline, mdiAccountCircle, mdiAccountGro
    mdiLoading, mdiLockReset, mdiLoginVariant, mdiLogout, mdiMagnify, mdiMagnifyClose,
    mdiMapSearchOutline, mdiMessageTextOutline, mdiMinusCircleOutline, mdiOpenInNew,
    mdiPauseCircleOutline, mdiPencil, mdiPencilOutline, mdiPlayCircleOutline, mdiPlus,
-   mdiProgressClock, mdiQqchat, mdiRadar, mdiRefresh, mdiRobotHappyOutline, mdiSend,
+   mdiProgressClock, mdiQqchat, mdiRadar, mdiRefresh, mdiRestart, mdiRobotHappyOutline, mdiSend,
    mdiSendOutline, mdiSendVariantOutline, mdiServerOutline, mdiShieldAlertOutline,
    mdiShieldCheckOutline, mdiShieldKeyOutline, mdiSortClockDescendingOutline, mdiStarOutline,
    mdiStop, mdiSwapHorizontal, mdiTextBoxSearchOutline, mdiTimerSand, mdiTimerSandComplete,
    mdiToolboxOutline, mdiTuneVariant, mdiUndoVariant, mdiViewDashboardOutline, mdiWeatherNight,
    mdiWeatherSunny, mdiWrenchOutline, } from '@mdi/js';
 
-/** 94 icons currently referenced by the WebUI. */
+/** 95 icons currently referenced by the WebUI. */
 export const namiIconAliases: Record<string, string> = {
   mdiAccessPoint,
   mdiAccountCheckOutline,
@@ -108,6 +108,7 @@ export const namiIconAliases: Record<string, string> = {
   mdiQqchat,
   mdiRadar,
   mdiRefresh,
+  mdiRestart,
   mdiRobotHappyOutline,
   mdiSend,
   mdiSendOutline,

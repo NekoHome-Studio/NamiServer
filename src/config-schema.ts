@@ -92,6 +92,15 @@ export const CONFIG_FIELDS: ConfigFieldSpec[] = [
     restartRequired: RESTART,
   },
   {
+    key: 'NAMI_HOT_RELOAD',
+    group: '服务',
+    type: 'bool',
+    description:
+      '监听 .env，文件一变就自动原地重载（不必手动重启）。关掉后需要点控制台的重启按钮。NAMI_HOST/NAMI_PORT 的变化在任何情况下都会重新绑定监听。',
+    read: (c) => c.hotReload,
+    restartRequired: RESTART,
+  },
+  {
     key: 'NAMI_LOG_FORMAT',
     group: '服务',
     type: 'enum',
@@ -123,8 +132,7 @@ export const CONFIG_FIELDS: ConfigFieldSpec[] = [
     restartRequired: RESTART,
   },
 
-  /* ------------------------ 控制台账号密码 ------------------------ */
-  {
+  /* ------------------------ 控制台账号密码 ------------------------ */  {
     key: 'NAMI_ADMIN_USER',
     group: '安全',
     type: 'string',

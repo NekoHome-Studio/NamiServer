@@ -71,6 +71,13 @@
       <v-spacer />
 
       <v-btn
+        icon="mdiRestart"
+        variant="text"
+        title="重启（重新读取 .env）"
+        :loading="restarting"
+        @click="openRestartDialog"
+      />
+      <v-btn
         :icon="theme.global.name.value === 'namiDark' ? 'mdiWeatherSunny' : 'mdiWeatherNight'"
         variant="text"
         :title="theme.global.name.value === 'namiDark' ? '切换到浅色' : '切换到深色'"
@@ -142,6 +149,47 @@
         </div>
       </v-alert>
     </div>
+
+    <!-- Restart: rebuilds every layer from .env without exiting the process. -->
+    <v-dialog v-model="restartDialog" max-width="560" :persistent="restarting">
+      <v-card title="重启 Nami">
+        <v-card-text>
+          <template v-if="!restarting">
+            <v-alert type="info" variant="tonal" density="comfortable" class="mb-4">
+              <div class="text-body-2">
+                重新读取 <code class="nami-mono">.env</code> 并重建服务（模型、工具、限流、数据库连接），
+                <strong>进程不会退出</strong>。会话数据保存在 SQLite 里，不会丢。
+              </div>
+            </v-alert>
+            <p class="text-body-2 mb-2">重启期间：</p>
+            <ul class="text-body-2 text-medium-emphasis ml-5">
+              <li>服务不可用约 1 秒，本页会自动等待并刷新</li>
+              <li>正在进行的对话/工具调用会被中断</li>
+              <li>若新配置启动失败，<strong>当前实例会继续服务</strong>，失败原因写在日志里</li>
+              <li>改了 <code class="nami-mono">NAMI_HOST</code> / <code class="nami-mono">NAMI_PORT</code> 时，需要用新地址重新打开</li>
+            </ul>
+            <v-alert v-if="restartError" type="error" variant="tonal" density="comfortable" class="mt-4">
+              <div class="text-body-2">{{ restartError }}</div>
+            </v-alert>
+          </template>
+
+          <template v-else>
+            <div class="d-flex align-center ga-3">
+              <v-progress-circular indeterminate size="22" />
+              <div class="text-body-2">正在重启，等待服务恢复…</div>
+            </div>
+            <p class="text-caption text-medium-emphasis mt-3">
+              如果迟迟不回来，检查服务器上的日志；若刚改过端口，请用新地址打开。
+            </p>
+          </template>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" :disabled="restarting" @click="restartDialog = false">取消</v-btn>
+          <v-btn color="primary" :loading="restarting" @click="confirmRestart">确认重启</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
 
     <!-- Change your own password. Revokes every other session, so it says so. -->
     <v-dialog v-model="passwordDialog" max-width="520">
@@ -221,8 +269,60 @@ const navItems = computed(() =>
     })),
 );
 
-const passwordDialog = ref(false);
-const currentPassword = ref('');
+const restartDialog = ref(false);
+const restarting = ref(false);
+const restartError = ref('');
+
+function openRestartDialog(): void {
+  restartError.value = '';
+  restartDialog.value = true;
+}
+
+/**
+ * Restarts, then waits for the service to come back.
+ *
+ * The reload closes or rebinds the listener, so the request that triggered it is
+ * the last one it can answer: the outcome has to be polled. Failures during that
+ * window are expected and must not abort the wait.
+ */
+async function confirmRestart(): Promise<void> {
+  restartError.value = '';
+  restarting.value = true;
+  const requestedAt = Date.now();
+
+  try {
+    await api.requestRestart('console');
+  } catch (error) {
+    restartError.value = describeError(error);
+    restarting.value = false;
+    return;
+  }
+
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    try {
+      const status = await api.restartStatus();
+      if (status.last !== null && status.last.at >= requestedAt - 1000) {
+        if (status.last.ok) {
+          window.location.reload();
+          return;
+        }
+        restartError.value = `重载被拒绝：${status.last.error ?? '未知原因'}（当前配置仍在服务）`;
+        restarting.value = false;
+        return;
+      }
+    } catch {
+      // Expected while the listener is being torn down and rebound.
+    }
+  }
+
+  restartError.value =
+    '等待重载结果超时。若刚修改过 NAMI_HOST / NAMI_PORT，请用新地址打开控制台；否则检查服务器日志。';
+  restarting.value = false;
+}
+
+const passwordDialog = ref(false);const currentPassword = ref('');
 const newPassword = ref('');
 const confirmPassword = ref('');
 const passwordError = ref('');

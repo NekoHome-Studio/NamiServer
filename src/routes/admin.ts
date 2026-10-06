@@ -7,6 +7,7 @@
  */
 
 import type { AppDeps } from '../app.ts';
+import { lastReloadResult, restartInProgress } from '../lifecycle.ts';
 import type { Router } from '../http/router.ts';
 import { asObject } from '../http/body.ts';
 import { LIMITS, clampInt } from '../http/query.ts';
@@ -227,5 +228,55 @@ export function registerAdminRoutes(
     const run = store.getRun(id);
     if (!run) throw new HttpError(404, `Run "${id}" was not found.`, 'run_not_found');
     sendJson(ctx.res, 200, { object: 'run', run, toolInvocations: store.listToolInvocations(id) });
+  });
+
+  /* ----------------------------- reload ----------------------------- */
+
+  /**
+   * Requests an in-place reload.
+   *
+   * Answers `202` and reloads afterwards, because the reload either closes this
+   * listener or rebinds it — finishing the response first is the only way the
+   * caller learns the request was accepted. The outcome is reported by
+   * `GET /admin/api/restart` (and by a reloaded `/healthz`), which is what the
+   * console polls.
+   *
+   * `503` when the process did not install a reloader: `bootstrap()` alone
+   * builds a server but does not own a lifecycle, as in the test fixtures.
+   */
+  router.post('/admin/api/restart', (ctx) => {
+    const restart = deps.restart;
+    if (restart === undefined) {
+      throw new HttpError(
+        503,
+        'This process was started without a reload handler, so it cannot restart itself.',
+        'restart_unavailable',
+      );
+    }
+    if (restartInProgress()) {
+      throw new HttpError(409, 'A reload is already in progress.', 'restart_in_progress');
+    }
+
+    const body = asObject(ctx.body);
+    const reason =
+      typeof body.reason === 'string' && body.reason.trim() !== ''
+        ? body.reason.trim()
+        : `requested by ${ctx.auth.key}`;
+    const at = Date.now();
+
+    sendJson(ctx.res, 202, { object: 'restart', scheduled: true, at, reason });
+    // Let the response reach the socket before its connection is torn down.
+    setTimeout(() => void restart(reason), 200);
+  });
+
+  /** Whether a reload is running, and how the last one ended. */
+  router.get('/admin/api/restart', (ctx) => {
+    sendJson(ctx.res, 200, {
+      object: 'restart',
+      restarting: restartInProgress(),
+      last: lastReloadResult(),
+      hotReload: config.hotReload,
+      available: deps.restart !== undefined,
+    });
   });
 }

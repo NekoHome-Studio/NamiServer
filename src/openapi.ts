@@ -939,6 +939,47 @@ export function buildOpenApiDocument(deps: AppDeps): Json {
           },
         },
       },
+      '/admin/api/restart': {
+        post: {
+          tags: ['Admin'],
+          summary: '原地重载（重启）',
+          description: [
+            '重新读取 `.env` 并在**不退出进程**的前提下重建整个服务：进程存活、数据库连接重建、监听保持。',
+            '',
+            '为什么不是 `process.exit()`：Nami 常由 `npm start` 或裸 `node` 启动，未必有守护进程；退出就可能再也起不来。',
+            '',
+            '安全性来自顺序：**先**用新配置把新实例完整建起来（旧实例仍在服务），只有建成功才切换。因此 `.env` 写错不会把控制台弄挂——重载会被拒绝，旧配置继续服务，原因写在日志里。',
+            '',
+            '响应 `202` 之后就断开/重绑连接，所以结果要通过 `GET /admin/api/restart`（或重连后的 `/healthz`）查询。',
+            '改了 `NAMI_HOST`/`NAMI_PORT` 会重新绑定监听，客户端需要按新地址重连；地址不变时理论上无中断。',
+          ].join('\n'),
+          requestBody: {
+            required: false,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { reason: { type: 'string', description: '写进日志的原因。' } },
+                },
+              },
+            },
+          },
+          responses: {
+            '202': jsonResponse('已排入队列，随后开始重载。', { type: 'object' }),
+            '409': errorResponse('已有一次重载在进行中。'),
+            '503': errorResponse('该进程没有装载重载器（例如仅用 bootstrap() 起的测试实例）。'),
+          },
+        },
+        get: {
+          tags: ['Admin'],
+          summary: '重载状态与上次结果',
+          description:
+            '控制台据此判断「刚才那次重载成功了吗」。结果保存在进程级：重载会替换实例，放在实例上会被它自己抹掉。',
+          responses: {
+            '200': jsonResponse('是否正在重载、上次的结果、热重载是否开启。', { type: 'object' }),
+          },
+        },
+      },
       '/admin/api/config': {
         get: {
           tags: ['Admin'],

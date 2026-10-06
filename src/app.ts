@@ -38,8 +38,28 @@ export interface AppDeps {
    * disk — the banner writes straight to stdout.
    */
   consoleAccount?: ConsoleAccountSeed;
+  /**
+   * Rebuilds the whole server from a freshly read configuration, in place.
+   *
+   * Installed by the entry point, which owns the lifecycle: a route can only ask
+   * for a restart, never perform one. Resolves with what happened so the caller
+   * can tell the operator whether the new configuration actually took effect.
+   */
+  restart?: (reason: string) => Promise<RestartResult>;
   /** Epoch ms when the process finished booting. */
   startedAt: number;
+}
+
+/** Outcome of an in-place restart. */
+export interface RestartResult {
+  ok: boolean;
+  /**
+   * True when the listener had to be rebound because `NAMI_HOST`/`NAMI_PORT`
+   * changed; that is the one case where clients see a real interruption.
+   */
+  addressChanged: boolean;
+  /** Why it failed, when `ok` is false. The previous instance is still serving. */
+  error?: string;
 }
 
 /** What the first-boot console-account seeding did. */
