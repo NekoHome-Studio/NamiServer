@@ -8,8 +8,9 @@ data/
 *.sqlite-shm
 *.log
 
-# Never commit key material. The handover SSH key lives here (see HANDOVER.md).
+# Never commit key material. Handover SSH keys live here (see HANDOVER.md).
 .ssh-handover/
+.nami-ssh/
 *.pem
 id_ed25519
 id_rsa
