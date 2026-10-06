@@ -8,6 +8,12 @@ data/
 *.sqlite-shm
 *.log
 
+# Never commit key material. The handover SSH key lives here (see HANDOVER.md).
+.ssh-handover/
+*.pem
+id_ed25519
+id_rsa
+
 # Build / tooling output
 node_modules/
 .npm-cache/
