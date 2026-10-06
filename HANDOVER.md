@@ -8,10 +8,17 @@
 ## 0. 一句话现状
 
 Nami 是一个自托管的 AI Agent 服务器载体（Node.js + TypeScript，**运行时零第三方依赖**，无构建步骤）。
-功能完整、测试充分，但：
+功能完整、测试充分。
 
-> ⚠️ **它从未在 Linux 上运行过，Docker 镜像也从未构建过。**
-> 所有验证都发生在 Windows + Node 24.13.1 上。Linux 相关的结论来自**静态检查**，不是实机运行。
+> ✅ **2026-10-06 已在真实 Linux 上跑过第 1 节的 ①—④**（Ubuntu + Node v22.23.2）：
+> 类型检查 0 错误、可移植性 **574 项 0 问题**、smoke **482 项全过**、插件自检 **448 项全过**、
+> 真实启动后 `/healthz`、`/v1/models`、`/v1/agent/run`（含工具循环）、SSE 事件流、`/admin` 全部正常，
+> SIGTERM 优雅退出也补测了。逐项记录见 `docs/linux-acceptance-2026-10-06.md`。
+>
+> ⚠️ **Docker 镜像仍然从未构建过**，**Alpine / musl 容器内实跑也未验证**——但这**不再是待办项**：
+> **本项目已决定不使用 Docker 部署**（2026-10-06，负责人决定）。`Dockerfile` / `docker-compose.yml`
+> 保留在仓库里，将来要用请当作**全新的、从未验证过**的东西对待（第 3 节 ① 与第 5 节仍是那时的清单）。
+> 下表里凡本次未覆盖的行，依然只有 Windows 结论或静态推断。
 
 > 📦 **关于 Docker 的一处刻意偏离**：原计划为 WebUI 改多阶段构建，但最终**不需要**——
 > Vue/Vuetify 的编译产物已提交在 `src/web/app`，`COPY src/` 就把它带进镜像了，
@@ -34,7 +41,7 @@ node -v                     # 必须 >= 22.6，强烈推荐 24.x
 
 # ── ② 全量测试（类型检查 + 可移植性检查 + 端到端断言）──────────
 npm test                    # 期望：✗ 0 项失败
-                            # 407 项断言 + 324 项可移植性检查
+                            # 482 项断言 + 574 项可移植性检查
 
 # ── ③ AstrBot 插件的离线自检（独立于上面那套）─────────────────
 cd integrations && python3 selftest_plugin_nami.py && cd ..
@@ -51,14 +58,15 @@ curl -s -X POST localhost:8787/v1/agent/run \
   -d '{"input":"echo 你好","stream":false}'
 # 期望：能读到 JSON 输出，且日志里有一次 run finished
 
-# ── ⑤ Docker 构建（★ 从未验证过，这是最高风险项）──────────────
+# ── ⑤ Docker 构建（本项目不使用 Docker，可跳过；脚本留作参考）──────
 docker build -t nami:handover .
 docker run --rm -p 8787:8787 -v nami-data:/app/data \
   -e NAMI_API_KEYS=dev_key nami:handover
 curl -s localhost:8787/healthz
 ```
 
-**只要 ①②③ 通过，代码本身在 Linux 上是好的。** ④⑤ 是部署层面的验证。
+**只要 ①②③ 通过，代码本身在 Linux 上是好的。** ④ 是部署层面的验证；⑤ **已不在本项目范围内**（不使用 Docker）。
+**本机运行时**用 `NAMI_API_KEYS=<你的 key> npm start`，并注意默认绑定 `127.0.0.1:8787`（要对外服务需 `NAMI_HOST=0.0.0.0`）。
 
 ---
 
@@ -66,26 +74,26 @@ curl -s localhost:8787/healthz
 
 | 内容 | 验证方式 | Windows | Linux | 说明 |
 | --- | --- | --- | --- | --- |
-| 类型检查（tsc，`erasableSyntaxOnly`） | `npm run typecheck` | ✅ 0 错误 | ⚠️ 推断 | tsc 本身跨平台 |
-| 端到端断言 407 项 | `npm run smoke` | ✅ 全过 | ❌ **未跑过** | 真实 HTTP / SSE / WebSocket / SQLite |
-| 可移植性静态检查 324 项 | `npm run check:portability` | ✅ 0 问题 | ⚠️ 推断 | 见下方「已静态排除的风险」 |
-| AstrBot 插件自检 448 项 | `python3 selftest_plugin_nami.py` | ✅ 全过 | ❌ **未跑过** | 纯标准库，跨平台风险低 |
-| **Docker 镜像构建** | `docker build` | ❌ 无 docker | ❌ **从未构建** | **最高风险项** |
-| **Alpine / musl 运行时** | 容器实跑 | ❌ | ❌ **从未运行** | 零原生依赖，理论上无风险 |
-| **SIGTERM 优雅退出** | `docker stop` | ⚠️ 只测了 SIGINT | ❌ **未测** | 代码里已注册 SIGTERM |
+| 类型检查（tsc，`erasableSyntaxOnly`） | `npm run typecheck` | ✅ 0 错误 | ✅ **0 错误** | tsc 本身跨平台；2026-10-06 实测确认 |
+| 端到端断言 482 项 | `npm run smoke` | ✅ 全过 | ✅ **482 项全过** | 真实 HTTP / SSE / WebSocket / SQLite |
+| 可移植性静态检查 574 项 | `npm run check:portability` | ✅ 0 问题 | ✅ **0 问题** | 见下方「已静态排除的风险」 |
+| AstrBot 插件自检 448 项 | `python3 selftest_plugin_nami.py` | ✅ 全过 | ✅ **448 项全过** | 纯标准库，跨平台风险低 |
+| **Docker 镜像构建** | `docker build` | ❌ 无 docker | — **不适用** | **本项目不使用 Docker**（2026-10-06 决定）；从未构建过，将来要用需从头验证 |
+| **Alpine / musl 运行时** | 容器实跑 | ❌ | — **不适用** | 不走容器就没有这条路径；零原生依赖，理论上无风险 |
+| **SIGTERM 优雅退出** | 真发 `kill -TERM` | ⚠️ 只测了 SIGINT | ✅ 已测（约 500ms 退出，码 0） | 实测暴露一处关闭竞态，**已修**，见 §3 ④ |
 | Ollama 原生协议 | 真实 0.34.4 守护进程 | ✅ `version`/`tags` 实测 | ⚠️ 推断 | `/api/chat` 用假守护进程验证（无模型可拉） |
 | Ollama 真实对话 | 真实模型生成 | ❌ **未验证** | ❌ | 本机没装任何模型，未擅自拉取 GB 级模型 |
 | OneBot v11 收发 | 假 OneBot 实现 | ✅ 全链路 | ⚠️ 推断 | 含真实进程级演示 |
 | OneBot 真实 QQ | 真实 SnowLuma + QQ | ❌ **未验证** | ❌ | 需要 Windows 上跑 NTQQ，本机未部署 |
 | AstrBot 插件被真实 AstrBot 加载 | WebUI 里加载 | ❌ **未验证** | ❌ | 环境没有 AstrBot；正确性基于桩 API + 官方文档 |
 | 管理面板视觉/交互 | 浏览器 | ❌ **未目视检查** | ❌ | 只做了 JS 语法检查 + 端点一致性核对 |
-| **WebUI 构建（`vite build`）** | `npm --prefix webui run build` | ✅ 成功 | ⚠️ 推断可行 | Vite 本身跨平台；产物已提交，Linux 上**不需要**重新构建 |
-| **WebUI 运行时（浏览器）** | 实际点击每个页面 | ❌ **从未运行** | ❌ | 无浏览器环境；类型检查通过、SFC 编译通过、产物引用图完整，但**没有人真正打开过这些页面** |
+| **WebUI 构建（`vite build`）** | `npm --prefix webui run build` | ✅ 成功 | ✅ **成功（4.1s）** | 2026-10-06 在 Linux 上真构建过一次，且产物**可复现**——54 个既有资源文件名与字节全不变，`index.html` 零差异；产物已提交，平时**不需要**重新构建 |
+| **WebUI 运行时（浏览器）** | 实际点击每个页面 | ❌ **从未运行** | ⚠️ 仅产物完整性 | 无浏览器环境；类型检查通过、SFC 编译通过、产物引用图完整，但**没有人真正打开过这些页面**。2026-10-06 在 Linux 上逐个请求了 `index.html` 引用的 4 个资源（全部 200），并顺带发现 favicon 404（**已修**） |
 | **WebUI 图标渲染** | 产物内 SVG 路径核对 | ✅ 已验证 | ⚠️ 推断 | 曾在产物中确认 `mdiSend` 的真实路径存在、裸 `mdi*` 字符串为 0；视觉未见 |
 
 ### 已经静态排除的 Linux 风险
 
-`npm run check:portability` 逐条查这些，当前 **324 项检查 0 问题**：
+`npm run check:portability` 逐条查这些，当前 **574 项检查 0 问题**：
 
 - **模块路径大小写**：Windows 上 `./Types.ts` 能找到 `types.ts`，Linux 上直接 404。检查器对每个相对导入**逐段做精确大小写比对**（`existsSync` 不够——它在 Windows 上会放行错误大小写）。
 - **资源引用大小写**：`panel.html`、`docs.html`、`logo.png`、页面里的 `./app.js` / `./style.css`。
@@ -100,7 +108,10 @@ curl -s localhost:8787/healthz
 
 ## 3. Linux 上最可能出问题的点（按概率排序）
 
-### ① Docker 构建失败 —— 概率最高
+> 本节原按「Windows 开发 → Linux 部署」排序。**① 与 ⑤ 只在用 Docker 时成立**；
+> 本项目已决定不使用 Docker（2026-10-06），**下面的 ②③④⑥ 才是本机部署的清单**。
+
+### ① Docker 构建失败 —— 仅在使用 Docker 时相关（本项目不用）
 
 `Dockerfile` 是 `node:24-alpine`，**不执行 `npm install`**（运行时零依赖），只 `COPY package.json src/ scripts/`。从未构建过，可能的问题：
 
@@ -108,7 +119,9 @@ curl -s localhost:8787/healthz
 - BusyBox `adduser` 对已存在的 `-h /app`（WORKDIR 已创建）有时会告警。
 - `HEALTHCHECK` 用的是 Node 内置 `fetch`（alpine 没有 curl/wget），依赖容器内 Node 可用。
 
-**处置**：直接构建，看报错。若卡在用户创建，可临时改成 `USER node`（官方镜像自带非 root 用户）验证其余部分。
+**2026-10-06 静态审计**（无 docker 权限，逐条对照已实测的运行时）：`NAMI_HOST=0.0.0.0`（必需，默认是 `127.0.0.1`）、`NAMI_PORT`、`NAMI_DB_PATH`（与 `config.ts:379` 一致）、`COPY package.json`（`"type":"module"` 必需）、`COPY src/`（顺带带上 `src/web/app` 产物）、HEALTHCHECK 打 `/healthz`（实测 200 且免鉴权）、`CMD` 均为实测过的命令——**未发现阻断性问题**。唯一无法离线判定的是 BusyBox `adduser` 与健康检查在真实 alpine 上的行为。详见 `docs/linux-acceptance-2026-10-06.md` §5。
+
+**处置**：将来真要使用时才需要——直接构建，看报错。若卡在用户创建，可临时改成 `USER node`（官方镜像自带非 root 用户）验证其余部分。
 
 ### ② `node:sqlite` —— 概率低但影响大
 
@@ -123,11 +136,29 @@ Nami 用 Node **内置**的 `node:sqlite`，不打原生模块。这对 alpine/m
 
 **处置**：优先用 named volume（compose 里已配 `nami-data:/app/data`）；用 bind mount 就 `chown -R 10001:10001 <宿主目录>`。
 
-### ④ SIGTERM 优雅退出 —— 未测
+### ④ SIGTERM 优雅退出 —— 已测；曾有一处关闭竞态（已修）
 
 `src/index.ts` 注册了 `SIGINT` 和 `SIGTERM`：先关监听、再关 WebSocket、最后关数据库，超时（`NAMI_SHUTDOWN_GRACE_MS`，默认 8s）后强制退出。`docker stop` 发的正是 SIGTERM。
 
-**验证方式**：`docker stop` 后看日志是否有 `shutdown complete`，并确认 `runs` 表里没有残留 `status='running'` 的记录（启动时也会自动把上次的僵尸 run 标记为 failed）。
+**2026-10-06 实测**（直接对 node 进程发 `SIGTERM`）：约 **500ms** 退出、退出码 **0**，`runs` 表无残留 `running`。
+
+但日志里跟着一条 ERROR，暴露出一个**真实竞态**，已修：
+
+```
+INFO  [nami] shutting down {"signal":"SIGTERM","graceMs":8000}
+ERROR [nami] unhandled promise rejection {"error":"database is not open"
+  at one (src/store/store.ts:435:27) ← SessionStore.counts ← src/index.ts:245}
+```
+
+- **根因**：`shutdown()` 的最后一步是 `store.close()`，而信号处理里是
+  `void shutdown().then(() => { …; log.info('shutdown complete', { sessions: store.counts().sessions }); process.exit(0); })`
+  ——「关闭之后再查数据库」。
+- **不只是日志噪音**：回调抛出后 `process.exit(0)` **执行不到**，`shutdown complete` 也永远不打印。
+  那次能干净退出只是因为事件循环恰好排空，属于运气。
+- **修法**：改为在 `shutdown()` **之前**取好计数（并对「库已被更早的 uncaughtException 关掉」做兜底），
+  同时给 `.then()` 补 `.catch()`，避免退出码再次被异常吞掉。
+
+**验证方式**（Docker 场景仍建议做）：`docker stop` 后确认日志里有 `shutdown complete` 且**没有** `unhandled promise rejection`，并确认 `runs` 表里没有残留 `status='running'` 的记录（启动时也会自动把上次的僵尸 run 标记为 failed）。
 
 ### ⑤ `host.docker.internal` —— 只在需要连通宿主服务时
 
@@ -166,8 +197,8 @@ neko-NamiServer/
 │   ├── web/                    panel.html（管理面板）+ docs.html（API 参考）
 │   └── openapi.ts              OpenAPI 3.1 规范（由测试校验与路由一致）
 ├── scripts/
-│   ├── smoke.ts                端到端测试，407 项断言
-│   ├── check-portability.ts    ★ 跨平台静态检查，324 项
+│   ├── smoke.ts                端到端测试，482 项断言
+│   ├── check-portability.ts    ★ 跨平台静态检查，574 项
 │   └── ollama.ts               一键接入 Ollama 向导
 ├── integrations/               ★ 独立于运行时，不进 Docker 镜像
 │   ├── astrbot_plugin_nami/    AstrBot 插件（Python，零第三方依赖）
@@ -222,15 +253,19 @@ NAMI_DB_PATH=/app/data/nami.sqlite
 
 ## 7. 已知缺口（不是 bug，是没做或没验证）
 
-1. **Docker 从未构建**（本文档反复强调）。
+1. **Docker 从未构建**（本文档反复强调）——**本项目已决定不使用 Docker，故不再是缺口**。`Dockerfile` / `docker-compose.yml` 仍留在仓库，将来要用请视为从未验证过。
 2. **AstrBot 插件从未被真实 AstrBot 加载**。验证靠桩 API + 官方文档 + 对着真实 Nami 打的接口契约。
    - 其中一处是**推断**：`filter.event_message_type(..., priority=N)` 的 `priority` 参数在能取到的文档里没写，插件做了 `TypeError` 兜底，但「值越大越晚执行」这个方向未经证实。在真实 AstrBot 上加载后请确认自动回复的优先级符合预期。
    - `metadata.yaml` 的 `repo` 字段被注释掉了（原值是占位地址）。填上真实仓库再取消注释。
    - `support_platforms` 里的平台名未与 AstrBot 的 `ADAPTER_NAME_2_TYPE` 注册表核对。
 3. **Ollama 未跑过真实对话生成**：本机 `{"models":[]}`，没装任何模型，也没擅自拉几个 GB。`/api/chat` 的 NDJSON 解析是对着镜像官方格式的桩验证的（并故意把一行 JSON 拆到两次 TCP 写入以测分片缓冲）。
+   - 2026-10-06 的 Linux 机器上 Ollama 守护进程是 **0.33.3**（比验证时的 0.34.4 旧），且只装了 `qwen3-embedding:4b`（embedding 模型，不能对话）——**真实对话生成仍未验证**。
 4. **OneBot 未接过真实 QQ**：SnowLuma 需要 NTQQ 客户端，本机未部署。
 5. **管理面板未目视检查**：只做了 JS 语法校验、资源引用大小写检查、9 个端点与真实路由逐一核对。
+   - 2026-10-06 在 Linux 上补做了「产物完整性」：`index.html` 引用的 4 个资源（index/vendor/vuetify 的 js + index.css）全部 200；**但依然没有人用浏览器点过任何页面**。
+   - 同一次检查发现 `webui/index.html` 引用的 `./favicon.svg` **从未随产物发布**（`webui/` 下没有 `public/`，Vite 对缺失的 public 资源不报错），于是控制台每次加载都多一个 404。**已修**：补了 `webui/public/favicon.svg`（矢量版波浪标）并重新构建进 `src/web/app/`。
 6. **`ruff` 未安装**，插件 Python 代码是手工按 ruff 风格写的（已程序化确认无超长行）。
+7. **`webui/.npmrc` 的 cache 路径与注释不符**：写的是 `cache=../.npm-cache`（注释说「把缓存留在仓库内」），但 npm 相对 **cwd** 解析它，于是在仓库根执行 `npm run webui:install` 时缓存落在**仓库外面**的上一级目录。想真正留在仓库内应写 `cache=.npm-cache`。（在受限沙箱里这会直接导致安装失败。）
 
 ---
 
@@ -238,14 +273,19 @@ NAMI_DB_PATH=/app/data/nami.sqlite
 
 在 Linux 上做完第 1 节后，请回填：
 
-- [ ] `node -v` 版本：______
-- [ ] `npm test` 结果：______ 项断言，失败数：______
-- [ ] `python3 selftest_plugin_nami.py` 结果：______
-- [ ] `npm run check:portability` 结果：______
-- [ ] `docker build` 是否成功：______（失败则贴报错）
-- [ ] 容器内 `curl localhost:8787/healthz` 是否正常：______
-- [ ] `docker stop` 是否干净退出（日志有无 `shutdown complete`）：______
-- [ ] 若装了 Ollama：`npm run ollama -- --write` 是否成功，真实对话是否正常：______
+> **回填：2026-10-06，Ubuntu + Node v22.23.2，仓库 @ `e7a3409`。**
+> 完整原始输出与逐项记录见 `docs/linux-acceptance-2026-10-06.md`。
+
+- [x] `node -v` 版本：**v22.23.2**（满足 >= 22.6；非推荐的 24.x 也能跑）
+- [x] `npm test` 结果：**482** 项断言，失败数：**0**（`tsc` 0 错误 + 可移植性 574 项 0 问题 + smoke 482 项全过）
+- [x] `python3 selftest_plugin_nami.py` 结果：**✓ 全部通过 448 项断言**（Python 3.10.12）
+- [x] `npm run check:portability` 结果：**✓ 通过 574 项检查，未发现阻碍 Linux 运行的问题**
+- [x] `docker build` 是否成功：**不适用**——本项目已决定不使用 Docker（2026-10-06）。作为替代，按 Dockerfile 逐条静态审计了它对本机实测运行时的假设，未发现阻断性问题（见 §3 ①）
+- [x] 容器内 `curl localhost:8787/healthz` 是否正常：**不适用**（不用 Docker）。**宿主机上已实测正常**（200，且免鉴权、不受限流影响）
+- [x] `docker stop` 是否干净退出（日志有无 `shutdown complete`）：**以直接对进程发 `SIGTERM` 代替**——约 500ms 退出、码 0，日志打出 `shutdown complete`；但**首次实测打出 `unhandled promise rejection: database is not open`**，根因是关闭后仍查库，**已修并复验**（见 §3 ④）
+- [ ] 若装了 Ollama：`npm run ollama -- --write` 是否成功，真实对话是否正常：**宿主有 Ollama 0.33.3，但只装了 `qwen3-embedding:4b`（不能对话）**，因此**真实对话仍未验证**（§7 第 3 条）
+
+**补充实测（清单之外）**：8787 被宿主上一无关服务占用；Nami 正确检测到冲突并以码 1 退出，提示改用 `NAMI_PORT`。改用 18787 后 `/healthz`、`/v1/models`（含 401 鉴权）、`/v1/agent/run`（工具循环 `rounds:2 toolCalls:1`）、SSE 事件序列、`/admin` 及其 4 个产物资源、`/openapi.json`、`/admin/classic` 全部正常。
 
 任何一项失败，请连同完整报错一起反馈——**第 2 节的表格就是用来定位「这是 Linux 特有的问题，还是原本就没验证过」的。**
 

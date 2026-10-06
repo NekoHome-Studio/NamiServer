@@ -13,11 +13,13 @@
 - 🔐 **API Key 鉴权 + 令牌桶限流**，密钥常量时间比较
 - 🖥️ **Web 管理面板** + **OpenAPI 3.1 规范**（`/openapi.json`、`/docs`）
 - 📦 **运行时零依赖**：`dependencies` 为 `{}`，无构建步骤，直接 `node src/index.ts`
-- 🐳 **Docker 一键部署**：非 root 运行，`/app/data` 数据卷
+- 🐳 **Docker 一键部署**：非 root 运行，`/app/data` 数据卷（**本项目未使用，镜像未构建/未验证**）
 
 > 🚚 **要把这份代码搬到 Linux 上部署或继续开发？** 先读 **[HANDOVER.md](HANDOVER.md)**。
 > 它写明了哪些内容已经在真实环境验证过、哪些只有静态检查、哪些从未验证，以及一份 15 分钟的验收清单。
-> 一句话：**这份代码从未在 Linux 上运行过，Docker 镜像也从未构建过。**
+> 一句话（2026-10-06 更新）：**这份代码已在真实 Linux 上跑通验收清单的 ①—④**（类型检查 / smoke / 插件自检 / 真实启动与全部通道），
+> 详细记录见 `HANDOVER.md` 与 `docs/linux-acceptance-2026-10-06.md`；
+> **本项目不使用 Docker**，故 Docker 相关章节（下文的「Docker 部署」与仓库里的 `Dockerfile`）保留但**未经验证**。
 
 ---
 
@@ -69,7 +71,7 @@ src/web/app/            ← 编译产物，已提交进仓库
 - **API Key 鉴权 + 令牌桶限流**：Bearer Token 常量时间比较，按 key 计费的令牌桶（容量 + 每秒补充），超限返回 `429` 与 `Retry-After`。
 - **Web 管理面板 + API 契约**：`/admin` 可视化面板；`/openapi.json` 是完整的 OpenAPI 3.1 规范，`/docs` 是它的实时渲染，且**由端到端测试校验与实现一致**。
 - **运行时零依赖**：`package.json` 的 `dependencies` 为 `{}`，只用 devDependencies 做类型检查；TypeScript 由 Node 内置的类型剥离直接执行。
-- **Docker 部署**：`node:24-alpine`、非 root 用户、`/app/data` 命名卷、内置 `HEALTHCHECK`。
+- **Docker 部署**：`node:24-alpine`、非 root 用户、`/app/data` 命名卷、内置 `HEALTHCHECK`。**本项目未使用 Docker，镜像未构建、容器内未运行**。
 
 ---
 
@@ -755,6 +757,10 @@ NAMI_TOOL_FS_ALLOW_ROOTS=/app/data,/srv/documents
 
 ## Docker 部署
 
+> ⚠️ **2026-10-06：本项目已决定不使用 Docker 部署。** 本节与仓库里的 `Dockerfile` / `docker-compose.yml` 一并保留，
+> 但**镜像从未构建过、容器内也从未运行过**——如果你要用，请把它当作全新的、未验证的东西（HANDOVER.md 第 3 节 ① 与第 5 节是那时的清单）。
+> 本机运行请看上面的「快速开始」：`NAMI_API_KEYS=<key> npm start`。
+
 镜像基于 `node:24-alpine`，**不执行 `npm install`**（运行时零依赖），只有 `package.json`、`src/`、`scripts/` 被复制进镜像，以非 root 用户运行，唯一可写路径是 `/app/data`。
 
 ### 方式一：Docker Compose（推荐）
@@ -848,13 +854,13 @@ npm run webui:dev         # 开发服务器（:5199，自动代理到本机 8787
 npm run webui:build       # 构建并输出到 src/web/app
 ```
 
-冒烟测试共 **394 项断言**，覆盖全部通道与安全边界。其中：
+冒烟测试共 **482 项断言**，覆盖全部通道与安全边界。其中：
 
 - **Ollama** 部分跑在测试内启动的**假 Ollama 守护进程**上，因此不需要真装 Ollama 也能验证：`/api/tags` 发现、NDJSON 流式解析（并故意把一行 JSON 拆到两次 TCP 写入以测试分片缓冲）、原生 tool calling、`num_ctx` / `keep_alive` 透传、别名与白名单策略、以及 Ollama 不可用时的降级行为。
 - **OneBot** 部分跑在测试内启动的**假 OneBot 实现**上，覆盖：入站过滤的每一条分支（@/前缀/全部/闭麦、私聊视为对机器人说话、自我循环、群与用户白名单、图片无文字）、上报密钥校验、`204` 先于模型返回、回答经真实 `at` 消息段回发、长回答分片、出站工具的白名单拒绝、以及管理端同步模拟与手动发送。
 - **外部集成契约**部分把 AstrBot 插件依赖的调用约定钉死：带冒号的作用域会话 id 能原样落库与取回、URL 编码后的会话删除、`/readyz` 的 `checks` 字段齐全、以及插件据此给建议的错误码。
 
-加上 AstrBot 插件自己的 **448 项**离线自检，这个仓库里共有 **842 项**可复现的断言。
+加上 AstrBot 插件自己的 **448 项**离线自检，这个仓库里共有 **930 项**可复现的断言。
 
 关于 `npm install`：**只有 `npm run typecheck`（和 `npm test` 的类型检查部分）需要它**，因为 `typescript` 与 `@types/node` 是 devDependencies。日常 `npm start` / `npm run dev` / `npm run smoke` 都不需要 `node_modules`，也不会产生 `dist/` 目录 —— 整个项目没有构建产物。
 

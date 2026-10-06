@@ -240,11 +240,36 @@ async function main(): Promise<void> {
     }, config.shutdownGraceMs);
     force.unref();
 
-    void shutdown().then(() => {
-      clearTimeout(force);
-      log.info('shutdown complete', { sessions: store.counts().sessions });
-      process.exit(0);
-    });
+    /*
+     * Read the session count *before* shutting down: `shutdown()` closes the
+     * store, and querying it afterwards threw "database is not open". That throw
+     * landed inside the `.then()` callback, so every graceful stop logged an
+     * unhandled rejection instead of "shutdown complete" and — worse — skipped
+     * the `process.exit(0)` below, leaving the exit to depend on the event loop
+     * happening to drain.
+     *
+     * The count is only for the log line, so a store that is already closed
+     * (an earlier uncaughtException can shut it down first) must not be fatal.
+     */
+    let sessions: number | null = null;
+    try {
+      sessions = store.counts().sessions;
+    } catch {
+      sessions = null;
+    }
+
+    void shutdown()
+      .then(() => {
+        clearTimeout(force);
+        log.info('shutdown complete', { sessions });
+        process.exit(0);
+      })
+      .catch((error: unknown) => {
+        log.error('shutdown failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        process.exit(1);
+      });
   };
 
   process.on('SIGINT', () => onSignal('SIGINT'));
