@@ -268,3 +268,23 @@ podman/buildah/nerdctl/kaniko → 全部不存在
 测试新增 15 项断言（用临时 `.env` 路径，避免写坏真实配置），覆盖：缺少确认被拒、令牌格式、写入文件、**重新读取文件后生效**、接口与 schema 都不回显令牌、清空后回落。
 
 数字：smoke **591** 项断言、可移植性 **656** 项、加插件自检共 **1039** 项。
+
+### 7. 接 AstrBot 管 QQ（同日稍后）
+
+用户确认 QQ 由 AstrBot 管（AstrBot 4.28.1，`/opt/astrbot`，root + systemd，`WorkingDirectory=/root/astrbot`）。结论与处理：
+
+- **Nami 的 OneBot 适配器在这条路上用不到**：它是 OneBot *客户端* + webhook 接收端，而 AstrBot 是 OneBot *服务端*。用户把 `NAMI_ONEBOT_URL` 指向 `127.0.0.1:6199`（AstrBot 那侧的 OneBot POST 端点，`GET /`→405、`POST /`→400），方向是反的，探测永远失败。全端口扫描确认本机没有任何 OneBot 实现的 HTTP API。
+- 该桥接已**关闭**（`NAMI_ONEBOT_ENABLED=false`）：它配的地址无法工作，而 `/onebot/event` 是**不经过 API Key、仅靠共享密钥**的公开端点，作用正是触发模型调用；Nami 又监听在公网 IP 上。关闭后该端点返回 503。
+- 正确路径是仓库自带的 AstrBot 插件。已打包成可直接在面板上传的 zip（插件零第三方依赖）。插件依赖的接口逐一验证：`/healthz`、`/readyz`、`/v1/models`、`/v1/chat/completions`（含 `X-Nami-Session` 按作用域落库）、`/admin/api/tools`。
+
+### 8. 首次接入真实对话模型（同日稍后）
+
+此前 Nami 一直是 `mock` provider（Ollama 里只有 `qwen3-embedding:4b`，不能对话）。已拉取 `qwen2.5:3b`（1.8GB）并切换 provider，实测：
+
+- `/v1/models` → `['qwen2.5:3b', 'qwen3-embedding:4b']`
+- `/v1/agent/run`「计算 12*(3+4)」→ 真实 `calc` 工具调用，回答「计算结果是 84」（首次 24.7s 含加载，第二次 10.6s）
+- 插件路径实测跨轮保持上下文（会话 `astrbot:group:88888`，8 条消息）
+
+**顺带修掉一键脚本的一个真 bug**：`scripts/ollama.ts` 的模型选择优先采用 `.env` 里已配置的名字，于是 `--pull qwen2.5:3b --write` 在全新环境下写出了占位名 `nami-mock-1`（Ollama 里根本不存在），**而且脚本在写之前刚打印过「该模型未安装」的警告**。现在「刚拉取的模型」优先于旧配置名（显式 `--model` 仍最优先），选择逻辑抽成纯函数 `selectModel()` 并加了 6 项断言。
+
+数字：smoke **597** 项断言、可移植性 **667** 项、加插件自检共 **1045** 项。

@@ -31,7 +31,7 @@ import { ModelRouter } from '../src/llm/router.ts';
 import type { StreamChunk } from '../src/llm/types.ts';
 import { listDocumentedRoutes } from '../src/openapi.ts';
 import { nullLogger } from '../src/logger.ts';
-import { parseArgs as parseOllamaArgs, upsertEnv } from './ollama.ts';
+import { parseArgs as parseOllamaArgs, selectModel, upsertEnv } from './ollama.ts';
 import {
   chunkMessage,
   decideEvent,
@@ -1781,6 +1781,45 @@ function testOllamaScript(): void {
   equal('解析 --write', args.write, true);
   equal('解析 --url', args.url, 'http://x:1');
   equal('未指定 --model 时为 null', args.model, null);
+
+  /*
+   * Model selection. The bug this pins down: the script used to prefer whatever
+   * `.env` already named, so on a fresh checkout
+   * `--pull qwen2.5:3b --write` wrote the placeholder `nami-mock-1` — a model
+   * Ollama has never heard of — right after warning that it was not installed.
+   */
+  const installed = ['qwen2.5:3b', 'qwen3-embedding:4b'];
+  equal(
+    '刚拉取的模型优先于配置里那个未安装的名字',
+    selectModel({ requested: null, configured: 'nami-mock-1', installed, justPulled: 'qwen2.5:3b' })
+      .model,
+    'qwen2.5:3b',
+  );
+  equal(
+    '显式 --model 仍然最优先',
+    selectModel({ requested: 'llama3.1:8b', configured: 'nami-mock-1', installed, justPulled: 'qwen2.5:3b' })
+      .model,
+    'llama3.1:8b',
+  );
+  equal(
+    '没有拉取时沿用已配置且已安装的模型',
+    selectModel({ requested: null, configured: 'qwen2.5:3b', installed, justPulled: null }).model,
+    'qwen2.5:3b',
+  );
+  equal(
+    '未配置时回落到已安装的第一个',
+    selectModel({ requested: null, configured: '', installed, justPulled: null }).model,
+    'qwen2.5:3b',
+  );
+  equal(
+    '一个模型都没有时为空串',
+    selectModel({ requested: null, configured: '', installed: [], justPulled: null }).model,
+    '',
+  );
+  check(
+    '沿用未安装的配置模型时会给出提示',
+    selectModel({ requested: null, configured: 'ghost:1b', installed, justPulled: null }).note !== '',
+  );
 
   const created = upsertEnv('', { NAMI_LLM_PROVIDER: 'ollama', NAMI_LLM_MODEL: 'qwen2.5:7b' });
   check(

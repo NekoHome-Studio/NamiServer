@@ -5,7 +5,7 @@
 - 🦙 **一键接入 Ollama**：`npm run ollama -- --write` 自动探测、列模型、拉取、写 `.env`；走原生 `/api/chat`，可控制 `num_ctx` / `keep_alive`
 - 🌐 **像 OpenAI 一样托管**：按请求 `model` 路由、别名映射（`gpt-4o-mini=qwen2.5:7b`）、模型白名单、上游不可达时优雅降级
 - 💬 **接入 QQ**：内置 OneBot v11 连接器，对接 SnowLuma / NapCat / LLOneBot；入站按 @ 或前缀触发、每个群独立会话，出站工具带发送白名单
-- 🤖 **接入 AstrBot**：附完整插件 `integrations/astrbot_plugin_nami/`（指令直连 + Dashboard 控制台 + 448 项离线自检）；也可以不装插件，直接把 Nami 配成 AstrBot 的 OpenAI 兼容提供商
+- 🤖 **接入 AstrBot（管 QQ 推荐走这条）**：附完整插件 `integrations/astrbot_plugin_nami/`（指令直连 + Dashboard 控制台 + 448 项离线自检）；也可以不装插件，直接把 Nami 配成 AstrBot 的 OpenAI 兼容提供商
 - 🧩 **可插拔 LLM 适配器**：`ollama` 原生适配器、`openai` 兼容任意 `/chat/completions` 端点、`mock` 完全离线可用
 - 🛠️ **带沙箱的工具调用循环**：JSON Schema 参数校验、超时、结果截断、危险工具默认关闭
 - 🔌 **三通道接入**：OpenAI 兼容 REST、原生 SSE 事件流、WebSocket 双向控制
@@ -880,13 +880,13 @@ npm run webui:dev         # 开发服务器（:5199，自动代理到本机 8787
 npm run webui:build       # 构建并输出到 src/web/app
 ```
 
-冒烟测试共 **591 项断言**，覆盖全部通道与安全边界。其中：
+冒烟测试共 **597 项断言**，覆盖全部通道与安全边界。其中：
 
 - **Ollama** 部分跑在测试内启动的**假 Ollama 守护进程**上，因此不需要真装 Ollama 也能验证：`/api/tags` 发现、NDJSON 流式解析（并故意把一行 JSON 拆到两次 TCP 写入以测试分片缓冲）、原生 tool calling、`num_ctx` / `keep_alive` 透传、别名与白名单策略、以及 Ollama 不可用时的降级行为。
 - **OneBot** 部分跑在测试内启动的**假 OneBot 实现**上，覆盖：入站过滤的每一条分支（@/前缀/全部/闭麦、私聊视为对机器人说话、自我循环、群与用户白名单、图片无文字）、上报密钥校验、`204` 先于模型返回、回答经真实 `at` 消息段回发、长回答分片、出站工具的白名单拒绝、以及管理端同步模拟与手动发送。
 - **外部集成契约**部分把 AstrBot 插件依赖的调用约定钉死：带冒号的作用域会话 id 能原样落库与取回、URL 编码后的会话删除、`/readyz` 的 `checks` 字段齐全、以及插件据此给建议的错误码。
 
-加上 AstrBot 插件自己的 **448 项**离线自检，这个仓库里共有 **1039 项**可复现的断言。
+加上 AstrBot 插件自己的 **448 项**离线自检，这个仓库里共有 **1045 项**可复现的断言。
 
 关于 `npm install`：**只有 `npm run typecheck`（和 `npm test` 的类型检查部分）需要它**，因为 `typescript` 与 `@types/node` 是 devDependencies。日常 `npm start` / `npm run dev` / `npm run smoke` 都不需要 `node_modules`，也不会产生 `dist/` 目录 —— 整个项目没有构建产物。
 
