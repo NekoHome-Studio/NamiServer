@@ -512,6 +512,79 @@ class NamiPlugin(Star):
             "elapsed": time.monotonic() - started,
         }
 
+    def _agent_mode(self) -> bool:
+        """是否用 Nami 的 Agent 接口（会真正调用工具）。"""
+        return self._conf_bool("agent_mode", False)
+
+    def _agent_body(self, prompt: str, session_id: str) -> dict[str, Any]:
+        """构造 ``POST /v1/agent/run`` 的请求体。
+
+        两个与对话接口不同的地方：
+
+        * 会话是**显式**的 ``sessionId`` 字段，不是 ``X-Nami-Session`` 头，所以
+          调用方必须把响应里的 ``sessionId`` 记回来（``_remember_session``）。
+        * ``stream=False``：QQ 回复本来就要等完整答案，一次拿 JSON 比解析 SSE
+          简单得多，也保住了「插件只有一个网络出口」这个性质——自测只需要替换
+          ``_http_json`` 就能完全离线。
+        """
+        body: dict[str, Any] = {"input": prompt, "stream": False}
+        if session_id:
+            body["sessionId"] = session_id
+        model = self._conf_str("default_model")
+        if model:
+            body["model"] = model
+        system_prompt = self._conf_str("system_prompt")
+        if system_prompt:
+            # agent 接口用 `system` 字段（对话接口是往 messages 里插一条）。
+            body["system"] = system_prompt
+        return body
+
+    async def _agent_run(self, prompt: str, *, session_id: str) -> dict[str, Any]:
+        """调用 ``POST /v1/agent/run``，返回与 :meth:`_chat` 相同的归一化形状。"""
+        started = time.monotonic()
+        _status, payload = await self._request(
+            "POST",
+            f"{self._host_root()}/v1/agent/run",
+            body=self._agent_body(prompt, session_id),
+            # 工具循环是「模型→工具→回灌→再问」，比一次对话慢得多：CPU 上
+            # 单轮就可能十几秒，所以这里用独立的、宽松得多的超时。
+            timeout=float(self._conf_int("agent_timeout", 180)),
+        )
+        data = _as_dict(payload)
+
+        # 工具名去重后按调用顺序保留，用于「本轮调用工具：…」那一行。
+        names: list[str] = []
+        for entry in _as_list(data.get("toolCallDetails")):
+            name = _as_dict(entry).get("name")
+            if isinstance(name, str) and name and name not in names:
+                names.append(name)
+
+        return {
+            "content": str(data.get("output") or ""),
+            "model": str(self._conf_str("default_model") or "nami"),
+            "usage": _as_dict(data.get("usage")),
+            "session_id": str(data.get("sessionId") or session_id),
+            "elapsed": time.monotonic() - started,
+            "tools": names,
+            "rounds": int(data.get("rounds") or 0),
+        }
+
+    async def _ask(self, prompt: str, *, session_id: str) -> dict[str, Any]:
+        """按配置选择对话接口或 Agent 接口。
+
+        两条路径返回同一种形状，所以命令、诊断与自动回复都不需要知道用的是哪条。
+        """
+        if self._agent_mode():
+            return await self._agent_run(prompt, session_id=session_id)
+        return await self._chat(prompt, session_id=session_id)
+
+    def _tool_suffix(self, result: dict[str, Any]) -> str:
+        """Agent 模式下「本轮调用了哪些工具」，可用 ``agent_show_tools`` 关掉。"""
+        names = result.get("tools") or []
+        if not names or not self._conf_bool("agent_show_tools", True):
+            return ""
+        return f"\n\n（本轮调用工具：{', '.join(names)}）"
+
     def _truncate(self, text: str) -> str:
         """按 ``max_reply_chars`` 截断回复。"""
         limit = self._conf_int("max_reply_chars", 1500)
@@ -657,7 +730,7 @@ class NamiPlugin(Star):
         scope_key = self._scope_key(event)
         session_id = self._session_id(scope_key)
         try:
-            result = await self._chat(text, session_id=session_id)
+            result = await self._ask(text, session_id=session_id)
         except NamiError as exc:
             yield event.plain_result(self._error_reply(exc))
             return
@@ -669,7 +742,8 @@ class NamiPlugin(Star):
             tail += f" · tokens {usage['total_tokens']}"
         answer = result["content"].strip() or "（Nami 返回了空内容）"
         reply = (
-            f"Nami 回答（模型 {result['model']} · 会话 {result['session_id']} · {tail}）\n\n{answer}"
+            f"Nami 回答（模型 {result['model']} · 会话 {result['session_id']} · {tail}）"
+            f"\n\n{answer}{self._tool_suffix(result)}"
         )
         yield event.plain_result(self._truncate(reply))
 
@@ -800,10 +874,14 @@ class NamiPlugin(Star):
         # 步骤 5：最小对话探测
         scope_key = self._scope_key(event)
         try:
-            result = await self._chat("ping", session_id=self._session_id(scope_key))
+            result = await self._ask("ping", session_id=self._session_id(scope_key))
             self._remember_session(scope_key, result["session_id"])
             preview = (result["content"].strip() or "（空内容）").replace("\n", " ")[:60]
+            mode = "Agent（可用工具）" if self._agent_mode() else "对话（不调用工具）"
             lines.append(f"[5/5] 对话探测: ✓ 模型 {result['model']} 返回 {preview!r}")
+            lines.append(f"模式: {mode}")
+            if result.get("tools"):
+                lines.append(f"  本轮工具: {', '.join(result['tools'])}")
             lines.append("结论: 全部通过，Nami 可用。")
         except NamiError as exc:
             lines.append(f"[5/5] 对话探测: ✗ {exc.message}")
@@ -870,13 +948,13 @@ class NamiPlugin(Star):
 
         scope_key = self._scope_key(event)
         try:
-            result = await self._chat(prompt, session_id=self._session_id(scope_key))
+            result = await self._ask(prompt, session_id=self._session_id(scope_key))
         except NamiError as exc:
             await event.send(event.plain_result(self._truncate(self._error_reply(exc))))
         else:
             self._remember_session(scope_key, result["session_id"])
             answer = result["content"].strip() or "（Nami 返回了空内容）"
-            await event.send(event.plain_result(self._truncate(answer)))
+            await event.send(event.plain_result(self._truncate(answer + self._tool_suffix(result))))
 
         # 已经由 Nami 回答，阻止这条消息继续走 AstrBot 自己的 LLM 流程。
         stopper = getattr(event, "stop_event", None)

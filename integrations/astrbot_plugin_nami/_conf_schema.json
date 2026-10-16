@@ -41,6 +41,25 @@
     "hint": "单次调用 Nami 的最长等待时间，本地小模型建议 60~120。",
     "default": 60
   },
+  "agent_mode": {
+    "type": "bool",
+    "description": "使用 Agent 模式（会调用 Nami 的工具）",
+    "hint": "默认关闭：走 /v1/chat/completions，纯对话，快。开启后走 /v1/agent/run，Nami 会真正调用工具（计算、时间、记忆等），回答更准，但慢得多——每轮工具调用都是一次额外推理，CPU 上单次可能 10~30 秒。",
+    "obvious_hint": true,
+    "default": false
+  },
+  "agent_timeout": {
+    "type": "int",
+    "description": "Agent 模式请求超时（秒）",
+    "hint": "仅在 agent_mode 开启时生效。工具循环要跑多轮推理，比普通对话慢得多，本地小模型建议 180~300；设太小会在工具跑完前就超时。",
+    "default": 180
+  },
+  "agent_show_tools": {
+    "type": "bool",
+    "description": "在回复里附上本轮调用的工具",
+    "hint": "仅在 agent_mode 开启时生效。会在回复末尾加一行「（本轮调用工具：calc）」，便于确认工具真的被调用；不想要这行就关掉。",
+    "default": true
+  },
   "system_prompt": {
     "type": "text",
     "description": "附加系统提示词",
@@ -51,8 +70,16 @@
     "type": "string",
     "description": "会话作用域",
     "hint": "决定 X-Nami-Session 如何生成：user 按发送者、group 按群聊（私聊回退到 user）、global 全局共用一个 Nami 会话。",
-    "options": ["user", "group", "global"],
-    "labels": ["按用户", "按群聊", "全局共用"],
+    "options": [
+      "user",
+      "group",
+      "global"
+    ],
+    "labels": [
+      "按用户",
+      "按群聊",
+      "全局共用"
+    ],
     "default": "group"
   },
   "enable_commands": {
@@ -78,8 +105,16 @@
     "type": "string",
     "description": "自动回复触发条件",
     "hint": "mention：被 @ 或包含关键词时；prefix：消息以指定前缀开头时；all：所有非空消息（token 消耗最大）。",
-    "options": ["mention", "prefix", "all"],
-    "labels": ["被 @ 或关键词", "指定前缀", "全部消息"],
+    "options": [
+      "mention",
+      "prefix",
+      "all"
+    ],
+    "labels": [
+      "被 @ 或关键词",
+      "指定前缀",
+      "全部消息"
+    ],
     "default": "mention"
   },
   "auto_reply_prefix": {
@@ -98,7 +133,11 @@
     "type": "int",
     "description": "回复最大字符数",
     "hint": "超过该长度的 Nami 回复会被截断，避免刷屏或被平台拒收。",
-    "slider": {"min": 100, "max": 5000, "step": 100},
+    "slider": {
+      "min": 100,
+      "max": 5000,
+      "step": 100
+    },
     "default": 1500
   }
 }

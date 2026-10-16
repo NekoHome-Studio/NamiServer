@@ -5,7 +5,7 @@
 - 🦙 **一键接入 Ollama**：`npm run ollama -- --write` 自动探测、列模型、拉取、写 `.env`；走原生 `/api/chat`，可控制 `num_ctx` / `keep_alive`
 - 🌐 **像 OpenAI 一样托管**：按请求 `model` 路由、别名映射（`gpt-4o-mini=qwen2.5:7b`）、模型白名单、上游不可达时优雅降级
 - 💬 **接入 QQ**：内置 OneBot v11 连接器，对接 SnowLuma / NapCat / LLOneBot；入站按 @ 或前缀触发、每个群独立会话，出站工具带发送白名单
-- 🤖 **接入 AstrBot（管 QQ 推荐走这条）**：附完整插件 `integrations/astrbot_plugin_nami/`（指令直连 + Dashboard 控制台 + 448 项离线自检）；也可以不装插件，直接把 Nami 配成 AstrBot 的 OpenAI 兼容提供商
+- 🤖 **接入 AstrBot（管 QQ 推荐走这条）**：附完整插件 `integrations/astrbot_plugin_nami/`（指令直连 + Dashboard 控制台 + 484 项离线自检）；也可以不装插件，直接把 Nami 配成 AstrBot 的 OpenAI 兼容提供商
 - 🧩 **可插拔 LLM 适配器**：`ollama` 原生适配器、`openai` 兼容任意 `/chat/completions` 端点、`mock` 完全离线可用
 - 🛠️ **带沙箱的工具调用循环**：JSON Schema 参数校验、超时、结果截断、危险工具默认关闭
 - 🔌 **三通道接入**：OpenAI 兼容 REST、原生 SSE 事件流、WebSocket 双向控制
@@ -74,7 +74,7 @@ src/web/app/            ← 编译产物，已提交进仓库
 - **原生 Ollama 适配器**：`llm/ollama.ts` 直接对接 `/api/chat`（NDJSON 流式），而非 OpenAI 兼容层——只有这样才能控制 `num_ctx`、`num_predict` 与 `keep_alive`，且不依赖较新的 Ollama 版本。原生 tool calling 少一层翻译。
 - **像 OpenAI 一样托管**：`llm/router.ts` 让客户端按名字选模型，支持别名映射（把硬编码 `gpt-4o-mini` 的工具指向本地模型）、客户端可见名白名单、自动发现与缓存；探测失败时**不拦截**请求，而是原样转发。
 - **OneBot v11 连接器**：`onebot/` 把 Nami 接到 SnowLuma（或任何 OneBot 实现）。入站端点在过滤后才花钱——`decideEvent` 是个纯函数，因为这里判错要么是「机器人装死」，要么是账单失控。出站发送工具双开关 + 白名单。
-- **AstrBot 插件**：`integrations/astrbot_plugin_nami/` 是独立于本仓库运行时的 Python 插件，带自己的 448 项离线自检；Nami 侧的端到端测试里有一组「外部集成契约」断言钉住它依赖的调用约定。
+- **AstrBot 插件**：`integrations/astrbot_plugin_nami/` 是独立于本仓库运行时的 Python 插件，带自己的 484 项离线自检；Nami 侧的端到端测试里有一组「外部集成契约」断言钉住它依赖的调用约定。
 - **可插拔 LLM 适配器**：`ollama` / `openai`（适配 OpenAI / DeepSeek / Groq / vLLM / LM Studio 等）/ `mock`（离线、确定性、会真的发起工具调用）三种 provider，新增适配器只需实现 `LLMProvider` 接口。
 - **带沙箱的工具调用循环**：`core/agent.ts` 驱动「模型 → 工具 → 回灌 → 再问」的多轮循环，每次工具调用都经过 `tools/sandbox.ts`：启用检查、JSON Schema 参数校验、独立超时（可用运行信号取消）、结果按字节截断。
 - **三通道接入**：OpenAI 兼容 REST（`/v1/chat/completions`、`/v1/models`）+ 原生 SSE（`/v1/agent/run` 事件流）+ WebSocket（`/ws` 双向控制，支持运行中取消）。
@@ -395,7 +395,7 @@ cp -r integrations/astrbot_plugin_nami  <AstrBot>/data/plugins/
 
 ```bash
 cd integrations
-python selftest_plugin_nami.py     # ✓ 全部通过 448 项断言
+python selftest_plugin_nami.py     # ✓ 全部通过 484 项断言
 ```
 
 Nami 侧的端到端测试里也有一组**外部集成契约**断言（`scripts/smoke.ts` 的 `testIntegrationContract`），钉住插件依赖的调用约定——包括带冒号的作用域会话 id、以及 URL 编码后的会话删除。改动 Nami 时若破坏了插件所依赖的行为，测试会失败而不是让插件悄悄坏掉。
@@ -886,7 +886,7 @@ npm run webui:build       # 构建并输出到 src/web/app
 - **OneBot** 部分跑在测试内启动的**假 OneBot 实现**上，覆盖：入站过滤的每一条分支（@/前缀/全部/闭麦、私聊视为对机器人说话、自我循环、群与用户白名单、图片无文字）、上报密钥校验、`204` 先于模型返回、回答经真实 `at` 消息段回发、长回答分片、出站工具的白名单拒绝、以及管理端同步模拟与手动发送。
 - **外部集成契约**部分把 AstrBot 插件依赖的调用约定钉死：带冒号的作用域会话 id 能原样落库与取回、URL 编码后的会话删除、`/readyz` 的 `checks` 字段齐全、以及插件据此给建议的错误码。
 
-加上 AstrBot 插件自己的 **448 项**离线自检，这个仓库里共有 **1045 项**可复现的断言。
+加上 AstrBot 插件自己的 **484 项**离线自检，这个仓库里共有 **1081 项**可复现的断言。
 
 关于 `npm install`：**只有 `npm run typecheck`（和 `npm test` 的类型检查部分）需要它**，因为 `typescript` 与 `@types/node` 是 devDependencies。日常 `npm start` / `npm run dev` / `npm run smoke` 都不需要 `node_modules`，也不会产生 `dist/` 目录 —— 整个项目没有构建产物。
 

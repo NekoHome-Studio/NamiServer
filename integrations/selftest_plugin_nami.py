@@ -336,6 +336,8 @@ MAIN_SOURCE = (PLUGIN_DIR / "main.py").read_text(encoding="utf-8")
 
 HOST = "http://127.0.0.1:8787"
 BASE = f"{HOST}/v1"
+# /v1/agent/run 挂在根地址下的 /v1 路径（不是 OpenAI 基址的拼接）
+AGENT_URL = f"{HOST}/v1/agent/run"
 
 API_KEY = "sk-nami-SECRET-KEY-abc123"
 ADMIN_TOKEN = "nami-admin-SECRET-TOKEN-xyz789"
@@ -420,7 +422,11 @@ class FakeNami:
             error = body.get("error")
             if isinstance(error, dict) and error.get("code"):
                 code = error["code"]
-            raise main.NamiError(code, f"HTTP {status}", status=status)
+            # 与真实 `_http_json` 一致：从错误信封里取人类可读的 message，
+            # 取不到才退回 "HTTP <status>"。写死状态码会让「把原因带给用户」
+            # 这条行为在离线自测里根本测不出来。
+            message = main._error_message_of(body, status)
+            raise main.NamiError(code, message, status=status)
         return status, payload
 
 
@@ -570,6 +576,20 @@ def happy_routes(fake: FakeNami) -> None:
     fake.add("GET", SESSIONS_URL, payload=SESSIONS)
     fake.add("GET", f"{BASE}/models", payload=MODELS)
     fake.add("POST", f"{BASE}/chat/completions", payload=CHAT)
+    fake.add(
+        "POST",
+        AGENT_URL,
+        payload={
+            "object": "agent.run",
+            "output": "计算结果是 84。这是结果 84",
+            "sessionId": "sess_new_from_agent",
+            "rounds": 2,
+            "toolCalls": 1,
+            "toolCallDetails": [{"name": "calc", "args": {"expression": "12*(3+4)"}, "danger": "safe"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            "durationMs": 1234,
+        },
+    )
 
 
 DEFAULT_CONFIG = {
@@ -579,6 +599,9 @@ DEFAULT_CONFIG = {
     "nami_admin_token": ADMIN_TOKEN,
     "default_model": "",
     "request_timeout": 60,
+    "agent_mode": False,
+    "agent_timeout": 180,
+    "agent_show_tools": True,
     "system_prompt": "",
     "session_scope": "group",
     "enable_commands": True,
@@ -861,6 +884,9 @@ def test_schema() -> None:
         "nami_admin_token",
         "default_model",
         "request_timeout",
+        "agent_mode",
+        "agent_timeout",
+        "agent_show_tools",
         "system_prompt",
         "session_scope",
         "enable_commands",
@@ -1048,6 +1074,95 @@ def test_models_command() -> None:
     empty_fake.add("GET", f"{BASE}/models", payload={"object": "list", "data": []})
     empty_text = text_of(run_sub("models", empty_plugin, FakeEvent(message_str="/nami 模型")))
     check_in("没有返回任何模型", empty_text, "空模型列表有明确提示")
+
+
+def test_agent_mode() -> None:
+    """Agent 模式：走 /v1/agent/run、归一化形状、工具行、超时与会话回记。"""
+
+    # --- 默认关闭：仍然走对话接口 ---
+    off_plugin, off_fake, _ = new_plugin()
+    off_text = text_of(run_sub("ask", off_plugin, FakeEvent(message_str="/nami 问 hi", group_id="g1")))
+    check_eq(len(off_fake.calls_to("POST", f"{BASE}/chat/completions")), 1, "默认关闭时走对话接口")
+    check_eq(len(off_fake.calls_to("POST", AGENT_URL)), 0, "默认关闭时不碰 Agent 接口")
+    check_not_in("本轮调用工具", off_text, "默认模式不出现工具行")
+
+    # --- 开启后：走 Agent 接口，请求体与超时都对 ---
+    plugin, fake, _ = new_plugin(agent_mode=True, default_model="qwen2.5:3b", system_prompt="你是娜美")
+    text = text_of(run_sub("ask", plugin, FakeEvent(message_str="/nami 问 计算 12*(3+4)", group_id="g9")))
+    calls = fake.calls_to("POST", AGENT_URL)
+    check_eq(len(calls), 1, "开启后调用 POST /v1/agent/run")
+    check_eq(len(fake.calls_to("POST", f"{BASE}/chat/completions")), 0, "开启后不再走对话接口")
+    call = calls[0]
+    check_eq(call["headers"].get("Authorization"), f"Bearer {API_KEY}", "Agent 调用带 Authorization")
+    body = call["json"]
+    check_eq(body.get("input"), "计算 12*(3+4)", "Agent 请求用 input 字段传问题")
+    check_eq(body.get("stream"), False, "Agent 请求用 stream=false（一次拿完整结果）")
+    check_eq(body.get("model"), "qwen2.5:3b", "Agent 请求带上 default_model")
+    check_eq(body.get("system"), "你是娜美", "Agent 请求用 system 字段传系统提示词")
+    check_eq(call["timeout"], 180.0, "Agent 请求使用 agent_timeout 而不是 request_timeout")
+    check_eq(
+        body.get("sessionId"), "astrbot:group:g9", "Agent 请求用显式 sessionId 传会话"
+    )
+    check("X-Nami-Session" not in call["headers"], "Agent 调用不发送 X-Nami-Session 头")
+
+    # --- 响应归一化 + 工具行 ---
+    check_in("结果 84", text, "回复取自响应里的 output 字段")
+    check_in("本轮调用工具：calc", text, "回复末尾附上本轮调用的工具")
+    check_in("sess_new_from_agent", text, "回复里带出服务端分配的新会话 id")
+
+    # --- 服务端分配的新会话被记回（会话连续性） ---
+    check_eq(
+        plugin._session_id("astrbot:group:g9"),
+        "sess_new_from_agent",
+        "把服务端分配的 sessionId 记回该作用域",
+    )
+
+    # --- 工具名去重、按调用顺序 ---
+    dedup_plugin, dedup_fake, _ = new_plugin(agent_mode=True)
+    dedup_fake.add(
+        "POST",
+        AGENT_URL,
+        payload={
+            "output": "两次计算都完成",
+            "sessionId": "sess_dedup",
+            "rounds": 3,
+            "toolCallDetails": [
+                {"name": "calc", "danger": "safe"},
+                {"name": "calc", "danger": "safe"},
+                {"name": "now", "danger": "safe"},
+            ],
+            "usage": {"total_tokens": 42},
+        },
+    )
+    dedup_text = text_of(run_sub("ask", dedup_plugin, FakeEvent(message_str="/nami 问 x", group_id="g10")))
+    check_in("本轮调用工具：calc, now", dedup_text, "工具名去重后按顺序展示")
+
+    # --- agent_show_tools=false 时不出现工具行 ---
+    quiet_plugin, quiet_fake, _ = new_plugin(agent_mode=True, agent_show_tools=False)
+    quiet_text = text_of(run_sub("ask", quiet_plugin, FakeEvent(message_str="/nami 问 x", group_id="g11")))
+    check_not_in("本轮调用工具", quiet_text, "关闭后不附工具行")
+    check_in("结果 84", quiet_text, "关闭工具行不影响回答本身")
+
+    # --- 没有工具调用时也不出现工具行 ---
+    plain_plugin, plain_fake, _ = new_plugin(agent_mode=True)
+    plain_fake.add("POST", AGENT_URL, payload={"output": "没用到工具", "sessionId": "s1", "rounds": 1})
+    plain_text = text_of(run_sub("ask", plain_plugin, FakeEvent(message_str="/nami 问 x", group_id="g12")))
+    check_not_in("本轮调用工具", plain_text, "没有工具调用时不出现工具行")
+
+    # --- Agent 端点报错时给出可读错误，而不是崩掉 ---
+    err_plugin, err_fake, _ = new_plugin(agent_mode=True)
+    err_fake.add_error("POST", AGENT_URL, "llm_unavailable", status=502, message="上游模型不可用")
+    err_text = text_of(run_sub("ask", err_plugin, FakeEvent(message_str="/nami 问 x", group_id="g13")))
+    check_in("上游模型不可用", err_text, "Agent 报错时把原因带给用户")
+
+    # --- 诊断里报出模式 ---
+    diag_plugin, _diag_fake, _ = new_plugin(agent_mode=True)
+    diag_text = text_of(run_sub("diag", diag_plugin, FakeEvent(message_str="/nami 诊断")))
+    check_in("Agent（可用工具）", diag_text, "诊断报出当前是 Agent 模式")
+
+    diag_off_plugin, _off_fake2, _ = new_plugin()
+    diag_off_text = text_of(run_sub("diag", diag_off_plugin, FakeEvent(message_str="/nami 诊断")))
+    check_in("对话（不调用工具）", diag_off_text, "诊断报出当前是对话模式")
 
 
 def test_ask_command() -> None:
@@ -1655,6 +1770,7 @@ def main_entry() -> int:
     test_registration()
     test_status_command()
     test_models_command()
+    test_agent_mode()
     test_ask_command()
     test_session_memory()
     test_tools_command()
