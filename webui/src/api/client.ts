@@ -332,7 +332,10 @@ export interface ConfigSaveResult {
   object: string;
   written: string;
   applied: Array<{ key: string; from: string | null; to: string; secret: boolean }>;
+  /** True in the sense that the new values arrive with a reload, not live. */
   restartRequired: boolean;
+  /** Whether the server will reload itself, or the operator must press restart. */
+  hotReload?: boolean;
   note?: string;
 }
 

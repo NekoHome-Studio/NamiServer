@@ -70,13 +70,20 @@
 
       <v-spacer />
 
+      <!--
+        Labelled, not icon-only: it sat next to the page-refresh button, whose
+        circular-arrow glyph is nearly identical, and nobody could tell them apart.
+      -->
       <v-btn
-        icon="mdiRestart"
         variant="text"
+        prepend-icon="mdiRestart"
+        class="text-none mr-1"
         title="重启（重新读取 .env）"
-        :loading="restarting"
-        @click="openRestartDialog"
-      />
+        :loading="restart.running.value"
+        @click="restart.ask()"
+      >
+        <span class="d-none d-sm-inline">重启</span>
+      </v-btn>
       <v-btn
         :icon="theme.global.name.value === 'namiDark' ? 'mdiWeatherSunny' : 'mdiWeatherNight'"
         variant="text"
@@ -151,10 +158,10 @@
     </div>
 
     <!-- Restart: rebuilds every layer from .env without exiting the process. -->
-    <v-dialog v-model="restartDialog" max-width="560" :persistent="restarting">
+    <v-dialog :model-value="restart.dialogOpen.value" max-width="560" :persistent="restart.running.value" @update:model-value="restart.close()">
       <v-card title="重启 Nami">
         <v-card-text>
-          <template v-if="!restarting">
+          <template v-if="!restart.running.value">
             <v-alert type="info" variant="tonal" density="comfortable" class="mb-4">
               <div class="text-body-2">
                 重新读取 <code class="nami-mono">.env</code> 并重建服务（模型、工具、限流、数据库连接），
@@ -168,8 +175,8 @@
               <li>若新配置启动失败，<strong>当前实例会继续服务</strong>，失败原因写在日志里</li>
               <li>改了 <code class="nami-mono">NAMI_HOST</code> / <code class="nami-mono">NAMI_PORT</code> 时，需要用新地址重新打开</li>
             </ul>
-            <v-alert v-if="restartError" type="error" variant="tonal" density="comfortable" class="mt-4">
-              <div class="text-body-2">{{ restartError }}</div>
+            <v-alert v-if="restart.error.value" type="error" variant="tonal" density="comfortable" class="mt-4">
+              <div class="text-body-2">{{ restart.error.value }}</div>
             </v-alert>
           </template>
 
@@ -185,8 +192,8 @@
         </v-card-text>
         <v-card-actions>
           <v-spacer />
-          <v-btn variant="text" :disabled="restarting" @click="restartDialog = false">取消</v-btn>
-          <v-btn color="primary" :loading="restarting" @click="confirmRestart">确认重启</v-btn>
+          <v-btn variant="text" :disabled="restart.running.value" @click="restart.close()">取消</v-btn>
+          <v-btn color="primary" :loading="restart.running.value" @click="restart.confirm()">确认重启</v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>
@@ -238,7 +245,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { useTheme } from 'vuetify';
 import { api } from '@/api/client';
 import type { HealthResponse, OverviewResponse } from '@/api/client';
-import { auth, describeError, formatUptime, shell } from '@/composables/useShell';
+import { auth, describeError, formatUptime, restart, shell } from '@/composables/useShell';
 
 const route = useRoute();
 const router = useRouter();
@@ -268,59 +275,6 @@ const navItems = computed(() =>
       icon: String(record.meta.icon),
     })),
 );
-
-const restartDialog = ref(false);
-const restarting = ref(false);
-const restartError = ref('');
-
-function openRestartDialog(): void {
-  restartError.value = '';
-  restartDialog.value = true;
-}
-
-/**
- * Restarts, then waits for the service to come back.
- *
- * The reload closes or rebinds the listener, so the request that triggered it is
- * the last one it can answer: the outcome has to be polled. Failures during that
- * window are expected and must not abort the wait.
- */
-async function confirmRestart(): Promise<void> {
-  restartError.value = '';
-  restarting.value = true;
-  const requestedAt = Date.now();
-
-  try {
-    await api.requestRestart('console');
-  } catch (error) {
-    restartError.value = describeError(error);
-    restarting.value = false;
-    return;
-  }
-
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    try {
-      const status = await api.restartStatus();
-      if (status.last !== null && status.last.at >= requestedAt - 1000) {
-        if (status.last.ok) {
-          window.location.reload();
-          return;
-        }
-        restartError.value = `重载被拒绝：${status.last.error ?? '未知原因'}（当前配置仍在服务）`;
-        restarting.value = false;
-        return;
-      }
-    } catch {
-      // Expected while the listener is being torn down and rebound.
-    }
-  }
-
-  restartError.value =
-    '等待重载结果超时。若刚修改过 NAMI_HOST / NAMI_PORT，请用新地址打开控制台；否则检查服务器日志。';
-  restarting.value = false;
-}
 
 const passwordDialog = ref(false);const currentPassword = ref('');
 const newPassword = ref('');

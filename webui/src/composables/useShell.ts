@@ -103,6 +103,78 @@ export function toastError(error: unknown, context?: string): void {
 }
 
 /* ------------------------------------------------------------------ *
+ * Restart
+ *
+ * One implementation and one confirmation dialog, shared by the app bar and the
+ * config page. The config page is where an operator looks right after editing,
+ * and a second copy of this logic would drift from this one.
+ * ------------------------------------------------------------------ */
+
+const restartDialogOpen = ref(false);
+const restartRunning = ref(false);
+const restartError = ref('');
+
+export const restart = {
+  dialogOpen: restartDialogOpen,
+  running: readonly(restartRunning),
+  error: readonly(restartError),
+
+  /** Opens the confirmation dialog. Nothing happens until it is confirmed. */
+  ask(): void {
+    restartError.value = '';
+    restartDialogOpen.value = true;
+  },
+
+  close(): void {
+    if (!restartRunning.value) restartDialogOpen.value = false;
+  },
+
+  /**
+   * Restarts, then waits for the service to come back.
+   *
+   * The reload closes or rebinds the listener, so the request that triggered it
+   * is the last one it can answer: the outcome has to be polled. Failures during
+   * that window are expected and must not abort the wait.
+   */
+  async confirm(): Promise<void> {
+    restartError.value = '';
+    restartRunning.value = true;
+    const requestedAt = Date.now();
+
+    try {
+      await api.requestRestart('console');
+    } catch (error) {
+      restartError.value = describeError(error);
+      restartRunning.value = false;
+      return;
+    }
+
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      try {
+        const status = await api.restartStatus();
+        if (status.last !== null && status.last.at >= requestedAt - 1000) {
+          if (status.last.ok) {
+            window.location.reload();
+            return;
+          }
+          restartError.value = `重载被拒绝：${status.last.error ?? '未知原因'}（当前配置仍在服务）`;
+          restartRunning.value = false;
+          return;
+        }
+      } catch {
+        // Expected while the listener is being torn down and rebound.
+      }
+    }
+
+    restartError.value =
+      '等待重载结果超时。若刚修改过 NAMI_HOST / NAMI_PORT，请用新地址打开控制台；否则检查服务器日志。';
+    restartRunning.value = false;
+  },
+};
+
+/* ------------------------------------------------------------------ *
  * Toasts
  * ------------------------------------------------------------------ */
 

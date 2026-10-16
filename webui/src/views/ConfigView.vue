@@ -2,7 +2,7 @@
   <v-container fluid class="pa-6">
     <PageHeader
       title="配置"
-      subtitle="这里的修改会写进项目根目录的 .env。Nami 不做热重载，所有字段都需要重启后才生效。"
+      subtitle="这里的修改会写进项目根目录的 .env，并在约 1 秒内自动热重载生效（进程不退出）。只有改了 .ts 源码才需要重启进程。"
     >
       <template #actions>
         <v-btn variant="tonal" prepend-icon="mdiRefresh" :loading="loading" @click="load">
@@ -11,28 +11,39 @@
       </template>
     </PageHeader>
 
-    <!-- 保存成功后的持久提示：重启这一步最容易被忘掉，所以不做成会消失的 toast。 -->
+    <!-- 保存成功后的持久提示：生效这一步最容易被忘掉，所以不做成会消失的 toast。 -->
     <v-alert
       v-if="savedNotice"
       type="success"
       variant="tonal"
       class="mb-4"
-      title="已写入 .env，重启 Nami 后生效"
+      title="已写入 .env"
     >
       <div class="text-body-2">
-        配置在进程启动时读取一次，没有热加载。请在项目根目录重新执行启动命令。
+        <template v-if="saveResult?.hotReload !== false">
+          热重载已开启：Nami 检测到文件变化后会自动原地重建服务，通常 1 秒内生效，无需其它操作。
+        </template>
+        <template v-else>
+          热重载已关闭（<code class="nami-mono">NAMI_HOT_RELOAD=false</code>），需要手动重启才会生效。
+        </template>
       </div>
       <div class="d-flex align-center ga-3 mt-3 flex-wrap">
-        <code class="nami-cmd">npm start</code>
         <v-btn
           size="small"
+          color="primary"
           variant="tonal"
-          prepend-icon="mdiContentCopy"
-          @click="copyRestartCommand"
+          prepend-icon="mdiRestart"
+          @click="restart.ask()"
         >
-          复制重启命令
+          立即重启
         </v-btn>
         <v-btn size="small" variant="text" @click="savedNotice = false">知道了</v-btn>
+        <span class="text-caption text-medium-emphasis">
+          只有改了 <code class="nami-mono">.ts</code> 源码才需要在项目根目录重新执行
+          <v-btn size="x-small" variant="text" prepend-icon="mdiContentCopy" @click="copyRestartCommand">
+            复制 npm start
+          </v-btn>
+        </span>
       </div>
     </v-alert>
 
@@ -234,14 +245,25 @@
           </v-table>
           <v-alert type="info" variant="tonal" density="comfortable" class="mt-4">
             <div class="text-body-2">
-              这些改动不会热加载：重启 Nami 后才会生效。可以直接复制
-              <code class="nami-mono">npm start</code>。
+              <template v-if="saveResult?.hotReload !== false">
+                已触发自动热重载，通常 1 秒内生效。也可以点下面的「立即重启」立刻应用。
+              </template>
+              <template v-else>
+                热重载已关闭，点下面的「立即重启」使其生效。
+              </template>
             </div>
           </v-alert>
         </v-card-text>
         <v-card-actions>
-          <v-btn variant="text" prepend-icon="mdiContentCopy" @click="copyRestartCommand">
-            复制重启命令
+          <v-btn
+            variant="text"
+            prepend-icon="mdiRestart"
+            @click="
+              saveDialog = false;
+              restart.ask();
+            "
+          >
+            立即重启
           </v-btn>
           <v-spacer />
           <v-btn color="primary" variant="tonal" @click="saveDialog = false">关闭</v-btn>
@@ -255,7 +277,7 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { api } from '@/api/client';
 import type { ConfigField, ConfigResponse, ConfigSaveResult } from '@/api/client';
-import { describeError, shell, toastError } from '@/composables/useShell';
+import { describeError, restart, shell, toastError } from '@/composables/useShell';
 import PageHeader from '@/components/PageHeader.vue';
 import AsyncSection from '@/components/AsyncSection.vue';
 import JsonBlock from '@/components/JsonBlock.vue';
@@ -549,7 +571,10 @@ async function save(): Promise<void> {
     saveResult.value = await api.saveConfig(buildChanges());
     saveDialog.value = true;
     savedNotice.value = true;
-    shell.success('配置已写入 .env', '重启 Nami 后生效。');
+    shell.success(
+      '配置已写入 .env',
+      saveResult.value?.hotReload === false ? '热重载已关闭，请点「立即重启」生效。' : '稍候约 1 秒会自动热重载生效。',
+    );
     // 重新拉一次：保存后当前值就是新值，脏状态随之清零。
     await load();
   } catch (e) {

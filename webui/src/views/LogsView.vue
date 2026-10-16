@@ -147,7 +147,7 @@
     >
       <div class="text-body-2">
         已经丢弃 <strong>{{ meta.dropped }}</strong> 条：缓冲写满后最旧的条目会被挤掉。
-        需要留更长的历史就把 <code class="nami-mono">NAMI_LOG_BUFFER_SIZE</code> 调大（重启生效），
+        需要留更长的历史就把 <code class="nami-mono">NAMI_LOG_BUFFER_SIZE</code> 调大（保存后自动热重载生效），
         或者把不需要的级别从控制台关掉。
       </div>
     </v-alert>
