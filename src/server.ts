@@ -28,6 +28,7 @@ import { registerLogRoutes } from './routes/logs.ts';
 import { registerOneBotRoutes } from './routes/onebot.ts';
 import { registerOpenAiRoutes } from './routes/openai.ts';
 import { registerSessionRoutes } from './routes/sessions.ts';
+import { registerWsRoutes } from './routes/ws.ts';
 import { buildOpenApiDocument } from './openapi.ts';
 import { readAppAsset, readAppIndex } from './web/app.ts';
 import { getDocsHtml, getPanelHtml } from './web/panel.ts';
@@ -82,6 +83,7 @@ export function createNamiServer(deps: AppDeps): NamiServer {
   // Registered before the other admin routes so `/admin/api/auth/*` can never be
   // shadowed by a parameterised pattern.
   registerAuthRoutes(router, deps);
+  registerWsRoutes(router, deps);
   registerAdminRoutes(router, deps, () => router.describe());
 
   /**
@@ -336,9 +338,16 @@ export function createNamiServer(deps: AppDeps): NamiServer {
 
       routeLabel = matched.pattern;
 
-      // Bodies are read only after a route matched, so 404s stay cheap.
+      /*
+       * Bodies are read only after a route matched, so 404s stay cheap.
+       *
+       * DELETE is included because the destructive admin endpoints take their
+       * `confirm: true` flag in the body, same as POST/PUT — without this a
+       * `DELETE /admin/api/ws/token` could never be confirmed and would always
+       * answer 400. A body-less DELETE still resolves immediately.
+       */
       let rawBody = '';
-      if (method === 'POST' || method === 'PUT' || method === 'PATCH') {
+      if (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
         try {
           rawBody = await readRawBody(req, config.maxBodyBytes);
           metrics.recordBytesIn(Buffer.byteLength(rawBody));

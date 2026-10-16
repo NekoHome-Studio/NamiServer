@@ -424,6 +424,21 @@ export class ApiError extends Error {
 
 const STORAGE_KEY = 'nami.credential';
 
+/** WebSocket access status, mirrored from `GET /admin/api/ws`. */
+export interface WsStatus {
+  path: string;
+  tokenConfigured: boolean;
+  activeConnections: number;
+  connectionsOpened: number;
+  messagesIn: number;
+  messagesOut: number;
+  maxConnectionsPerKey: number;
+  heartbeatMs: number;
+  maxPayloadBytes: number;
+  envPath: string;
+  hotReload: boolean;
+}
+
 /** State of the in-place reload, mirrored from `GET /admin/api/restart`. */
 export interface RestartStatus {
   restarting: boolean;
@@ -690,6 +705,25 @@ export class NamiClient {
 
   restartStatus(): Promise<RestartStatus> {
     return this.get('/admin/api/restart');
+  }
+
+  wsStatus(): Promise<WsStatus> {
+    return this.get('/admin/api/ws');
+  }
+
+  /**
+   * Mints a WebSocket token.
+   *
+   * The value comes back **once** — afterwards the API only reports whether one
+   * is set, so the caller has to show it immediately and not rely on reading it
+   * back later.
+   */
+  generateWsToken(): Promise<{ token: string; written: string; hotReload: boolean; note: string }> {
+    return this.json('/admin/api/ws/token', 'POST', { confirm: true });
+  }
+
+  removeWsToken(): Promise<{ removed: boolean; note: string }> {
+    return this.json('/admin/api/ws/token', 'DELETE', { confirm: true });
   }
 
   readyz(): Promise<ReadyzResponse> {

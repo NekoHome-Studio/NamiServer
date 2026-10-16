@@ -3559,6 +3559,82 @@ async function testWebSocketToken(): Promise<void> {
   equal('schema 里 configured=true', field?.configured, true);
 }
 
+/**
+ * WebSocket token management endpoints.
+ *
+ * Uses a fixture whose `NAMI_ENV_PATH` points at a temp file — the same guard the
+ * config-editor test uses, because these endpoints *write `.env`* and a careless
+ * fixture would rewrite the developer's real one.
+ */
+async function testWsTokenAdmin(): Promise<void> {
+  section('WebSocket 令牌管理接口');
+
+  /*
+   * A directory whose `.env` is the file under test. It has to be *named* `.env`
+   * because that is the name the loader reads, while `NAMI_ENV_PATH` tells the
+   * endpoints where to write — pointing both at the same file is what makes the
+   * round trip meaningful.
+   */
+  const dir = join(DATA_DIR, `ws-token-${process.pid}`);
+  mkdirSync(dir, { recursive: true });
+  const envPath = join(dir, '.env');
+  writeFileSync(envPath, '# smoke\n');
+  const fixture = await startServer('ws-admin', {
+    NAMI_ENV_PATH: envPath,
+    NAMI_API_KEYS: API_KEY,
+  });
+  const admin = { key: null, adminToken: ADMIN_TOKEN };
+
+  const initial = await http(fixture, 'GET', '/admin/api/ws', admin);
+  equal('状态接口 → 200', initial.status, 200);
+  equal('初始未配置令牌', (initial.json as { tokenConfigured?: boolean })?.tokenConfigured, false);
+  equal('状态接口报出路径', (initial.json as { path?: string })?.path, '/ws');
+
+  equal(
+    '生成令牌缺少确认 → 400',
+    (await http(fixture, 'POST', '/admin/api/ws/token', { ...admin, json: {} })).status,
+    400,
+  );
+
+  const generated = await http(fixture, 'POST', '/admin/api/ws/token', {
+    ...admin,
+    json: { confirm: true },
+  });
+  equal('生成令牌 → 201', generated.status, 201);
+  const token = (generated.json as { token?: string })?.token ?? '';
+  check('返回的令牌形如 nami_ws_…', /^nami_ws_[A-Za-z0-9_-]{20,}$/.test(token), token);
+  check('令牌已写入 .env', readFileSync(envPath, 'utf8').includes(`NAMI_WS_TOKEN=${token}`));
+
+  /*
+   * A running instance does not re-read `.env` by itself — that is the hot-reload
+   * watcher's job, and fixtures built with `bootstrap()` have none. So the value
+   * is checked the way a restart would see it: by loading the file again.
+   */
+  equal('重新读取 .env 后令牌生效', loadConfig({ cwd: dir, reload: true }).ws.token, token);
+
+  // The token is returned exactly once; the read paths must never echo it.
+  const after = await http(fixture, 'GET', '/admin/api/ws', admin);
+  check('状态接口不回显令牌', !JSON.stringify(after.json).includes(token));
+  const configRaw = JSON.stringify((await http(fixture, 'GET', '/admin/api/config', admin)).json);
+  check('配置接口不回显令牌', !configRaw.includes(token));
+
+  equal(
+    '移除令牌缺少确认 → 400',
+    (await http(fixture, 'DELETE', '/admin/api/ws/token', { ...admin, json: {} })).status,
+    400,
+  );
+  const removed = await http(fixture, 'DELETE', '/admin/api/ws/token', {
+    ...admin,
+    json: { confirm: true },
+  });
+  equal('移除令牌 → 200', removed.status, 200);
+  const envAfter = readFileSync(envPath, 'utf8');
+  check('键被清空而不是留下旧值', !envAfter.includes(token), envAfter.slice(0, 200));
+  check('键仍然存在（留空即关闭）', envAfter.includes('NAMI_WS_TOKEN='));
+
+  equal('清空后重新读取即为未配置', loadConfig({ cwd: dir, reload: true }).ws.token, null);
+}
+
 /* ------------------------------------------------------------------ *
  * Entry point
  * ------------------------------------------------------------------ */
@@ -3596,6 +3672,7 @@ async function main(): Promise<void> {
     await testConsoleAccounts();
     await testHotReload();
     await testWebSocketToken();
+    await testWsTokenAdmin();
   } catch (error) {
     failures.push({
       name: 'unexpected exception',

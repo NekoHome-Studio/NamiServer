@@ -23,18 +23,19 @@ import { mdiAccessPoint, mdiAccountCheckOutline, mdiAccountCircle, mdiAccountGro
    mdiDatabaseOutline, mdiDebugStepOver, mdiDelete, mdiDeleteSweepOutline, mdiEye, mdiEyeOff,
    mdiFlaskOutline, mdiFormatLetterCase, mdiFormatListBulleted, mdiHelpCircleOutline,
    mdiHistory, mdiHomeOutline, mdiInboxArrowDownOutline, mdiInboxOutline, mdiInformationOutline,
-   mdiKeyOutline, mdiLanConnect, mdiLanDisconnect, mdiLightningBoltOutline, mdiLinkVariant,
-   mdiLoading, mdiLockReset, mdiLoginVariant, mdiLogout, mdiMagnify, mdiMagnifyClose,
-   mdiMapSearchOutline, mdiMessageTextOutline, mdiMinusCircleOutline, mdiOpenInNew,
-   mdiPauseCircleOutline, mdiPencil, mdiPencilOutline, mdiPlayCircleOutline, mdiPlus,
-   mdiProgressClock, mdiQqchat, mdiRadar, mdiRefresh, mdiRestart, mdiRobotHappyOutline, mdiSend,
-   mdiSendOutline, mdiSendVariantOutline, mdiServerOutline, mdiShieldAlertOutline,
-   mdiShieldCheckOutline, mdiShieldKeyOutline, mdiSortClockDescendingOutline, mdiStarOutline,
-   mdiStop, mdiSwapHorizontal, mdiTextBoxSearchOutline, mdiTimerSand, mdiTimerSandComplete,
-   mdiToolboxOutline, mdiTuneVariant, mdiUndoVariant, mdiViewDashboardOutline, mdiWeatherNight,
-   mdiWeatherSunny, mdiWrenchOutline, } from '@mdi/js';
+   mdiKeyOutline, mdiKeyPlus, mdiKeyRemove, mdiLanConnect, mdiLanDisconnect,
+   mdiLightningBoltOutline, mdiLinkVariant, mdiLoading, mdiLockReset, mdiLoginVariant,
+   mdiLogout, mdiMagnify, mdiMagnifyClose, mdiMapSearchOutline, mdiMessageTextOutline,
+   mdiMinusCircleOutline, mdiOpenInNew, mdiPauseCircleOutline, mdiPencil, mdiPencilOutline,
+   mdiPlayCircleOutline, mdiPlus, mdiProgressClock, mdiQqchat, mdiRadar, mdiRefresh, mdiRestart,
+   mdiRobotHappyOutline, mdiSend, mdiSendOutline, mdiSendVariantOutline, mdiServerOutline,
+   mdiShieldAlertOutline, mdiShieldCheckOutline, mdiShieldKeyOutline,
+   mdiSortClockDescendingOutline, mdiStarOutline, mdiStop, mdiSwapHorizontal,
+   mdiTextBoxSearchOutline, mdiTimerSand, mdiTimerSandComplete, mdiToolboxOutline,
+   mdiTuneVariant, mdiUndoVariant, mdiViewDashboardOutline, mdiWeatherNight, mdiWeatherSunny,
+   mdiWrenchOutline, } from '@mdi/js';
 
-/** 95 icons currently referenced by the WebUI. */
+/** 97 icons currently referenced by the WebUI. */
 export const namiIconAliases: Record<string, string> = {
   mdiAccessPoint,
   mdiAccountCheckOutline,
@@ -85,6 +86,8 @@ export const namiIconAliases: Record<string, string> = {
   mdiInboxOutline,
   mdiInformationOutline,
   mdiKeyOutline,
+  mdiKeyPlus,
+  mdiKeyRemove,
   mdiLanConnect,
   mdiLanDisconnect,
   mdiLightningBoltOutline,

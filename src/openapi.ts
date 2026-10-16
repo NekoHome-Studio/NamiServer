@@ -939,6 +939,66 @@ export function buildOpenApiDocument(deps: AppDeps): Json {
           },
         },
       },
+      '/admin/api/ws': {
+        get: {
+          tags: ['Admin'],
+          summary: 'WebSocket 接入状态',
+          description:
+            '端点路径、并发上限、活跃连接，以及**是否启用了专用令牌**（永远不回显令牌本身）。控制台的 WebSocket 卡片据此渲染。',
+          responses: { '200': jsonResponse('WebSocket 状态。', { type: 'object' }) },
+        },
+      },
+      '/admin/api/ws/token': {
+        post: {
+          tags: ['Admin'],
+          summary: '生成并启用 WebSocket 专用令牌',
+          description: [
+            '生成一个 `nami_ws_…` 令牌、写入 `.env` 并触发热重载；写入完成后 `/ws` **只认这个令牌**（API Key 与 Admin Token 都不再能连）。',
+            '',
+            '**令牌只在这一次响应里返回**，之后接口只报告 `configured: true/false`，无法再读回——与其它所有密钥一致。之所以在这里破例返回一次：WebSocket 凭据必须被复制进客户端，而浏览器无法为握手设置请求头。',
+            '',
+            '必须携带 `confirm: true`：轮换会导致所有现有 WS 客户端断开，不应由一个误发的请求触发。',
+          ].join('\n'),
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['confirm'],
+                  properties: { confirm: { type: 'boolean', const: true } },
+                },
+              },
+            },
+          },
+          responses: {
+            '201': jsonResponse('新令牌（仅此一次）。', { type: 'object' }),
+            '400': errorResponse('缺少显式确认。'),
+            '500': errorResponse('`.env` 不可写。'),
+          },
+        },
+        delete: {
+          tags: ['Admin'],
+          summary: '移除 WebSocket 专用令牌',
+          description: '把该键清空并触发热重载，`/ws` 回落到 API Key 鉴权。同样需要 `confirm: true`。',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['confirm'],
+                  properties: { confirm: { type: 'boolean', const: true } },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': jsonResponse('已清空。', { type: 'object' }),
+            '400': errorResponse('缺少显式确认。'),
+          },
+        },
+      },
       '/admin/api/restart': {
         post: {
           tags: ['Admin'],
