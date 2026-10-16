@@ -9,11 +9,13 @@
  * Run with: npm run smoke
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, isAbsolute, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bootstrap, type BootstrappedServer } from '../src/index.ts';
+import { Lifecycle, lastReloadResult } from '../src/lifecycle.ts';
 import { loadConfig, type Config } from '../src/config.ts';
 import type { AgentEventMap } from '../src/core/types.ts';
 import { computeAcceptKey, encodeFrame, OPCODE, FrameParser, unmask } from '../src/ws/frames.ts';
@@ -30,7 +32,7 @@ import { ModelRouter } from '../src/llm/router.ts';
 import type { StreamChunk } from '../src/llm/types.ts';
 import { listDocumentedRoutes } from '../src/openapi.ts';
 import { nullLogger } from '../src/logger.ts';
-import { parseArgs as parseOllamaArgs, upsertEnv } from './ollama.ts';
+import { parseArgs as parseOllamaArgs, selectModel, upsertEnv } from './ollama.ts';
 import { parseArgs as parseOfmArgs, parseExpose, pickPinnedModel, probeGateway } from './ofm.ts';
 import {
   chunkMessage,
@@ -1025,15 +1027,59 @@ async function testAdminAndPanel(main: Fixture): Promise<void> {
   const panel = await http(main, 'GET', '/admin', { key: null });
   equal('/admin 无需鉴权返回 200', panel.status, 200);
   check('/admin 返回 HTML', (panel.headers.get('content-type') ?? '').includes('text/html'));
-  check('/admin 设置 CSP 头', panel.headers.get('content-security-policy') !== null);
+  /*
+   * The shell's JS and CSS are EXTERNAL files under /admin/assets, so the policy
+   * must contain `'self'`. It once shipped with the inline-only policy that the
+   * self-contained classic panel needs; browsers then refused to load the module
+   * script and the stylesheet and rendered a blank page, while curl and every
+   * status-code assertion kept passing. Assert the directive, not the header's
+   * presence.
+   */
+  const csp = panel.headers.get('content-security-policy') ?? '';
+  check('/admin 设置 CSP 头', csp !== '');
+  check('/admin 的 CSP 允许同源脚本', /script-src[^;]*'self'/.test(csp), csp);
+  check('/admin 的 CSP 允许同源样式', /style-src[^;]*'self'/.test(csp), csp);
+  check('/admin 的 CSP 未放开任意来源脚本', !/script-src[^;]*\*/.test(csp), csp);
   check('/admin 设置 nosniff', panel.headers.get('x-content-type-options') === 'nosniff');
   check('/admin 是 SPA 外壳（含挂载点）', panel.body.includes('id="app"'), panel.body.slice(0, 160));
   check('/admin 外壳引用了构建产物', /\/admin\/assets\/.+\.js/.test(panel.body));
+
+  // The referenced entry script must actually be servable, with a JS MIME type:
+  // a 404 or a text/plain here is another blank page that no CSP test catches.
+  const shellAsset = /(\/admin\/assets\/[^"']+\.js)/.exec(panel.body)?.[1] ?? '';
+  check('/admin 外壳里的入口脚本路径可解析', shellAsset !== '', panel.body.slice(0, 200));
+  if (shellAsset !== '') {
+    const asset = await http(main, 'GET', shellAsset, { key: null });
+    equal(`入口脚本 ${shellAsset} 可取 → 200`, asset.status, 200);
+    check(
+      '入口脚本以 JS MIME 返回',
+      /javascript/.test(asset.headers.get('content-type') ?? ''),
+      asset.headers.get('content-type') ?? '',
+    );
+  }
 
   // The classic panel is the no-build escape hatch, and must stay reachable.
   const classic = await http(main, 'GET', '/admin/classic', { key: null });
   equal('/admin/classic 仍然可用', classic.status, 200);
   check('/admin/classic 是完整面板', classic.body.length > 2000, `${classic.body.length} 字节`);
+
+  // Its policy is the *opposite* of the shell's, so the two cannot share one.
+  const classicCsp = classic.headers.get('content-security-policy') ?? '';
+  check(
+    '/admin/classic 的 CSP 允许内联脚本（自包含单文件）',
+    /script-src[^;]*'unsafe-inline'/.test(classicCsp),
+    classicCsp,
+  );
+  check(
+    'classic 与 SPA 的 CSP 不同（共用一套必然弄坏一个）',
+    classicCsp !== csp,
+    `classic=${classicCsp}`,
+  );
+
+  // /docs is also self-contained HTML and must keep working.
+  const docs = await http(main, 'GET', '/docs', { key: null });
+  const docsCsp = docs.headers.get('content-security-policy') ?? '';
+  check('/docs 的 CSP 允许内联脚本', /script-src[^;]*'unsafe-inline'/.test(docsCsp), docsCsp);
 
   // Hash routing means any /admin sub-path returns the same shell.
   const deepLink = await http(main, 'GET', '/admin/some/deep/route', { key: null });
@@ -2302,6 +2348,45 @@ function testOllamaScript(): void {
   equal('解析 --url', args.url, 'http://x:1');
   equal('未指定 --model 时为 null', args.model, null);
 
+  /*
+   * Model selection. The bug this pins down: the script used to prefer whatever
+   * `.env` already named, so on a fresh checkout
+   * `--pull qwen2.5:3b --write` wrote the placeholder `nami-mock-1` — a model
+   * Ollama has never heard of — right after warning that it was not installed.
+   */
+  const installed = ['qwen2.5:3b', 'qwen3-embedding:4b'];
+  equal(
+    '刚拉取的模型优先于配置里那个未安装的名字',
+    selectModel({ requested: null, configured: 'nami-mock-1', installed, justPulled: 'qwen2.5:3b' })
+      .model,
+    'qwen2.5:3b',
+  );
+  equal(
+    '显式 --model 仍然最优先',
+    selectModel({ requested: 'llama3.1:8b', configured: 'nami-mock-1', installed, justPulled: 'qwen2.5:3b' })
+      .model,
+    'llama3.1:8b',
+  );
+  equal(
+    '没有拉取时沿用已配置且已安装的模型',
+    selectModel({ requested: null, configured: 'qwen2.5:3b', installed, justPulled: null }).model,
+    'qwen2.5:3b',
+  );
+  equal(
+    '未配置时回落到已安装的第一个',
+    selectModel({ requested: null, configured: '', installed, justPulled: null }).model,
+    'qwen2.5:3b',
+  );
+  equal(
+    '一个模型都没有时为空串',
+    selectModel({ requested: null, configured: '', installed: [], justPulled: null }).model,
+    '',
+  );
+  check(
+    '沿用未安装的配置模型时会给出提示',
+    selectModel({ requested: null, configured: 'ghost:1b', installed, justPulled: null }).note !== '',
+  );
+
   const created = upsertEnv('', { NAMI_LLM_PROVIDER: 'ollama', NAMI_LLM_MODEL: 'qwen2.5:7b' });
   check(
     '新建 .env 写入两个键',
@@ -3470,6 +3555,691 @@ async function testWebUiBundle(main: Fixture): Promise<void> {
   equal('缺失产物 → 404（不返回外壳）', unknownAsset.status, 404);
 }
 
+/**
+ * Console account authentication.
+ *
+ * The assertions that matter most are the ones that would regress silently:
+ * that the session **cookie** is what authenticates the console, that a wrong
+ * password is indistinguishable from an unknown user, that only the *hash* of a
+ * session token is stored, and that removing the last administrator is refused
+ * from every direction.
+ */
+async function testConsoleAccounts(): Promise<void> {
+  section('控制台账号与会话鉴权');
+
+  const password = 'first-password-123';
+  const fixture = await startServer('auth', {
+    NAMI_ADMIN_USER: 'Admin',
+    NAMI_ADMIN_PASSWORD: password,
+    NAMI_LOGIN_MAX_ATTEMPTS: '3',
+    NAMI_LOGIN_LOCKOUT_SECONDS: '60',
+  });
+
+  /* ------------------------------ seeding ------------------------------ */
+
+  const seeded = fixture.app.deps.store.listUsers();
+  equal('首次启动播种了 1 个账号', seeded.length, 1);
+  equal('用户名被规范化为小写', seeded[0]?.username, 'admin');
+  equal('播种账号是管理员', seeded[0]?.isAdmin, true);
+  check(
+    '口令以 scrypt 哈希入库（无明文）',
+    (seeded[0]?.passwordHash ?? '').startsWith('scrypt$') &&
+      !(seeded[0]?.passwordHash ?? '').includes(password),
+  );
+  check(
+    '环境变量提供了密码时不再随机生成',
+    fixture.app.deps.consoleAccount?.generatedPassword === null,
+  );
+
+  /* ------------------------------- login ------------------------------- */
+
+  const before = await http(fixture, 'GET', '/admin/api/auth/me', { key: null });
+  equal('/me 未登录 → 200（不是 401）', before.status, 200);
+  equal(
+    '/me 未登录 authenticated=false',
+    (before.json as { authenticated?: boolean })?.authenticated,
+    false,
+  );
+
+  const wrong = await http(fixture, 'POST', '/admin/api/auth/login', {
+    key: null,
+    json: { username: 'admin', password: 'not-the-password' },
+  });
+  const unknown = await http(fixture, 'POST', '/admin/api/auth/login', {
+    key: null,
+    json: { username: 'nobody', password: 'not-the-password' },
+  });
+  equal('错误密码 → 401', wrong.status, 401);
+  equal('不存在的用户 → 401', unknown.status, 401);
+  equal(
+    '未知用户与错误密码的消息一致（无法枚举账号）',
+    (unknown.json as { error?: { message?: string } })?.error?.message,
+    (wrong.json as { error?: { message?: string } })?.error?.message,
+  );
+  equal(
+    '未知用户与错误密码的错误码一致',
+    (unknown.json as { error?: { code?: string } })?.error?.code,
+    (wrong.json as { error?: { code?: string } })?.error?.code,
+  );
+
+  const login = await http(fixture, 'POST', '/admin/api/auth/login', {
+    key: null,
+    json: { username: 'admin', password },
+  });
+  equal('正确密码 → 200', login.status, 200);
+  const setCookie = login.headers.get('set-cookie') ?? '';
+  check('下发会话 Cookie', setCookie.includes('nami_session='), setCookie);
+  check('Cookie 带 HttpOnly', /httponly/i.test(setCookie), setCookie);
+  check('Cookie 带 SameSite=Strict', /samesite=strict/i.test(setCookie), setCookie);
+  check('明文 HTTP 下不误标 Secure', !/;\s*secure/i.test(setCookie), setCookie);
+
+  const token = /nami_session=([^;]+)/.exec(setCookie)?.[1] ?? '';
+  check('取到会话令牌', token !== '');
+
+  /* --------------------- the database holds only a hash --------------------- */
+
+  equal('会话已落库', fixture.app.deps.store.countAuthSessions(), 1);
+  const dbHash = createHash('sha256').update(token, 'utf8').digest('hex');
+  check('可用 SHA-256(令牌) 反查到会话', fixture.app.deps.store.findAuthSession(dbHash) !== null);
+  check('令牌原文在库里查不到', fixture.app.deps.store.findAuthSession(token) === null);
+
+  /* ---------------------------- cookie auth ---------------------------- */
+
+  const cookie = { cookie: `nami_session=${token}` };
+  const me = await http(fixture, 'GET', '/admin/api/auth/me', { key: null, headers: cookie });
+  equal(
+    '带 Cookie 的 /me → authenticated',
+    (me.json as { authenticated?: boolean })?.authenticated,
+    true,
+  );
+  equal(
+    '带 Cookie 的 /me 报出用户名',
+    (me.json as { user?: { username?: string } })?.user?.username,
+    'admin',
+  );
+  equal('via 标记为 session', (me.json as { via?: string })?.via, 'session');
+
+  equal(
+    'Cookie 可用于 /admin/api/*',
+    (await http(fixture, 'GET', '/admin/api/users', { key: null, headers: cookie })).status,
+    200,
+  );
+  equal(
+    'Cookie 也可用于 /v1/*（控制台的对话与模型页依赖它）',
+    (await http(fixture, 'GET', '/v1/models', { key: null, headers: cookie })).status,
+    200,
+  );
+  equal(
+    '没有 Cookie 时 /admin/api/* 仍然 401',
+    (await http(fixture, 'GET', '/admin/api/users', { key: null })).status,
+    401,
+  );
+
+  /* --------------------------- account admin --------------------------- */
+
+  const created = await http(fixture, 'POST', '/admin/api/users', {
+    key: null,
+    headers: cookie,
+    json: { username: 'ALICE', password: 'alice-password-123', isAdmin: false },
+  });
+  equal('新建账号 → 201', created.status, 201);
+  equal(
+    '新建用户名同样规范化为小写',
+    (created.json as { user?: { username?: string } })?.user?.username,
+    'alice',
+  );
+
+  equal(
+    '重复用户名 → 409',
+    (
+      await http(fixture, 'POST', '/admin/api/users', {
+        key: null,
+        headers: cookie,
+        json: { username: 'alice', password: 'another-password-123' },
+      })
+    ).status,
+    409,
+  );
+  equal(
+    '过短的密码 → 400',
+    (
+      await http(fixture, 'POST', '/admin/api/users', {
+        key: null,
+        headers: cookie,
+        json: { username: 'bob', password: 'short' },
+      })
+    ).status,
+    400,
+  );
+  equal(
+    '非法用户名 → 400',
+    (
+      await http(fixture, 'POST', '/admin/api/users', {
+        key: null,
+        headers: cookie,
+        json: { username: 'a b!', password: 'bob-password-123' },
+      })
+    ).status,
+    400,
+  );
+
+  const listed = await http(fixture, 'GET', '/admin/api/users', { key: null, headers: cookie });
+  const listedRaw = JSON.stringify(listed.json);
+  equal('账号列表含 2 个账号', (listed.json as { data?: unknown[] })?.data?.length, 2);
+  check('账号列表不含任何口令材料', !listedRaw.includes('scrypt$') && !listedRaw.includes(password));
+
+  type UserRow = { id: string; username: string };
+  const rows = (listed.json as { data?: UserRow[] }).data ?? [];
+  const alice = rows.find((entry) => entry.username === 'alice');
+  const admin = rows.find((entry) => entry.username === 'admin');
+
+  equal(
+    '管理员重置他人密码 → 200',
+    (
+      await http(fixture, 'POST', `/admin/api/users/${alice?.id ?? ''}/password`, {
+        key: null,
+        headers: cookie,
+        json: { password: 'alice-reset-password-1' },
+      })
+    ).status,
+    200,
+  );
+  equal(
+    '被重置的账号可用新密码登录',
+    (
+      await http(fixture, 'POST', '/admin/api/auth/login', {
+        key: null,
+        json: { username: 'alice', password: 'alice-reset-password-1' },
+      })
+    ).status,
+    200,
+  );
+
+  /* --------------------- last-admin and self guards --------------------- */
+
+  equal(
+    '不能删除当前登录账号 → 409',
+    (
+      await http(fixture, 'DELETE', `/admin/api/users/${admin?.id ?? ''}`, {
+        key: null,
+        headers: cookie,
+      })
+    ).status,
+    409,
+  );
+  equal(
+    '不能降级最后一个管理员 → 409',
+    (
+      await http(fixture, 'PUT', `/admin/api/users/${admin?.id ?? ''}`, {
+        key: null,
+        headers: cookie,
+        json: { isAdmin: false },
+      })
+    ).status,
+    409,
+  );
+  equal(
+    '可以停用普通账号 → 200',
+    (
+      await http(fixture, 'PUT', `/admin/api/users/${alice?.id ?? ''}`, {
+        key: null,
+        headers: cookie,
+        json: { disabled: true },
+      })
+    ).status,
+    200,
+  );
+  equal(
+    '停用后无法登录 → 401',
+    (
+      await http(fixture, 'POST', '/admin/api/auth/login', {
+        key: null,
+        json: { username: 'alice', password: 'alice-reset-password-1' },
+      })
+    ).status,
+    401,
+  );
+
+  /* --------------------------- password change --------------------------- */
+
+  const second = await http(fixture, 'POST', '/admin/api/auth/login', {
+    key: null,
+    json: { username: 'admin', password },
+  });
+  const secondToken = /nami_session=([^;]+)/.exec(second.headers.get('set-cookie') ?? '')?.[1] ?? '';
+  check('同一账号可以有第二个会话', secondToken !== '');
+
+  const changed = await http(fixture, 'POST', '/admin/api/auth/password', {
+    key: null,
+    headers: cookie,
+    json: { currentPassword: password, newPassword: 'brand-new-password-9' },
+  });
+  equal('修改自己的密码 → 200', changed.status, 200);
+  check(
+    '改密报告注销了其它会话',
+    ((changed.json as { revokedSessions?: number })?.revokedSessions ?? 0) >= 1,
+  );
+  equal(
+    '改密后其它设备的会话立即失效 → 401',
+    (
+      await http(fixture, 'GET', '/admin/api/users', {
+        key: null,
+        headers: { cookie: `nami_session=${secondToken}` },
+      })
+    ).status,
+    401,
+  );
+  equal(
+    '旧密码不再可用 → 401',
+    (
+      await http(fixture, 'POST', '/admin/api/auth/login', {
+        key: null,
+        json: { username: 'admin', password },
+      })
+    ).status,
+    401,
+  );
+  equal(
+    'API Key 不能改密码（没有对应账号）→ 403',
+    (
+      await http(fixture, 'POST', '/admin/api/auth/password', {
+        key: fixture.key,
+        json: { currentPassword: 'x', newPassword: 'whatever-password-1' },
+      })
+    ).status,
+    403,
+  );
+
+  /* ------------------------------- logout ------------------------------- */
+
+  const third = await http(fixture, 'POST', '/admin/api/auth/login', {
+    key: null,
+    json: { username: 'admin', password: 'brand-new-password-9' },
+  });
+  const thirdToken = /nami_session=([^;]+)/.exec(third.headers.get('set-cookie') ?? '')?.[1] ?? '';
+  equal(
+    '退出登录 → 200',
+    (
+      await http(fixture, 'POST', '/admin/api/auth/logout', {
+        key: null,
+        headers: { cookie: `nami_session=${thirdToken}` },
+      })
+    ).status,
+    200,
+  );
+  equal(
+    '退出后该 Cookie 立即失效 → 401',
+    (
+      await http(fixture, 'GET', '/admin/api/users', {
+        key: null,
+        headers: { cookie: `nami_session=${thirdToken}` },
+      })
+    ).status,
+    401,
+  );
+
+  /* ------------------------------- lockout ------------------------------- */
+
+  const lockFixture = await startServer('auth-lock', {
+    NAMI_ADMIN_PASSWORD: 'lockout-password-123',
+    NAMI_LOGIN_MAX_ATTEMPTS: '3',
+    NAMI_LOGIN_LOCKOUT_SECONDS: '60',
+  });
+  let lastStatus = 0;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const result = await http(lockFixture, 'POST', '/admin/api/auth/login', {
+      key: null,
+      json: { username: 'admin', password: 'wrong-password' },
+    });
+    lastStatus = result.status;
+    if (result.status === 429) {
+      check('锁定响应带 Retry-After', (result.headers.get('retry-after') ?? '') !== '');
+      break;
+    }
+  }
+  equal('连续失败达到阈值后 → 429', lastStatus, 429);
+  equal(
+    '锁定期内即使密码正确也被拒 → 429',
+    (
+      await http(lockFixture, 'POST', '/admin/api/auth/login', {
+        key: null,
+        json: { username: 'admin', password: 'lockout-password-123' },
+      })
+    ).status,
+    429,
+  );
+}
+
+/**
+ * Configuration hot reload and in-place restart.
+ *
+ * Drives the real `Lifecycle` against a real `.env` in a temp directory, because
+ * the properties that matter cannot be checked by reading the code:
+ *
+ *   * an edit is actually picked up (the first `loadConfig` fills `process.env`
+ *     and a naive second read would keep the old value forever);
+ *   * the listener survives the swap on the same address;
+ *   * **a broken configuration is refused and the running instance keeps
+ *     serving** — the whole reason the replacement is built before the swap.
+ */
+async function testHotReload(): Promise<void> {
+  section('配置热重载与原地重启');
+
+  const dir = join(DATA_DIR, `reload-${process.pid}`);
+  mkdirSync(dir, { recursive: true });
+  const envPath = join(dir, '.env');
+  const port = await freePort();
+
+  const writeEnv = (rounds: number, extra: Record<string, string> = {}): void => {
+    const lines = [
+      `NAMI_DB_PATH=${join(dir, 'reload.sqlite')}`,
+      `NAMI_PORT=${port}`,
+      'NAMI_HOST=127.0.0.1',
+      'NAMI_LLM_PROVIDER=mock',
+      `NAMI_API_KEYS=${API_KEY}`,
+      'NAMI_ADMIN_PASSWORD=reload-password-123',
+      `NAMI_MAX_TOOL_ROUNDS=${rounds}`,
+      ...Object.entries(extra).map(([key, value]) => `${key}=${value}`),
+    ];
+    writeFileSync(envPath, `${lines.join('\n')}\n`);
+  };
+
+  /*
+   * Always `reload: true`, even for the first read.
+   *
+   * This process has already run many fixtures, and each one left its `NAMI_*`
+   * values in `process.env`; a plain load only *fills* missing keys, so it would
+   * silently adopt the previous fixture's port instead of this file's. Reload
+   * mode discards exactly those injected values — which is also what makes the
+   * second read below see the edit.
+   */
+  const load = (): Config => loadConfig({ cwd: dir, reload: true });
+
+  writeEnv(2);
+  const firstConfig = load();
+  const firstApp = await bootstrap(firstConfig);
+  started.push(firstApp);
+
+  const lifecycle = new Lifecycle(
+    { config: firstConfig, app: firstApp },
+    {
+      boot: (config, seedLogs, startedAt) =>
+        bootstrap(config, {
+          ...(seedLogs === undefined ? {} : { seedLogs }),
+          ...(startedAt === undefined ? {} : { startedAt }),
+        }),
+      load: () => load(),
+    },
+  );
+  firstApp.deps.restart = (reason: string) => lifecycle.restart(reason);
+  await lifecycle.start();
+
+  const base = `http://127.0.0.1:${port}`;
+  equal('重载前 maxRounds = 2', lifecycle.current().config.agent.maxRounds, 2);
+  equal('实例已在监听', (await fetchText(`${base}/healthz`)).status, 200);
+
+  /* ------------------------- an edit is picked up ------------------------- */
+
+  writeEnv(5);
+  const reloaded = await lifecycle.restart('smoke-test');
+  equal('重载成功', reloaded.ok, true);
+  equal('地址未变，无需重绑', reloaded.addressChanged, false);
+  equal('新的 maxRounds 已生效', lifecycle.current().config.agent.maxRounds, 5);
+  equal('同一个地址仍在服务', (await fetchText(`${base}/healthz`)).status, 200);
+  const lastOk = lastReloadResult();
+  equal('记录了这次成功的重载', lastOk?.ok, true);
+  equal(
+    '「进程运行时长」跨重载保持（实例重建不等于进程重启）',
+    lifecycle.current().app.deps.startedAt,
+    firstApp.deps.startedAt,
+  );
+  equal('记录里的原因', lastOk?.reason, 'smoke-test');
+  // A closed store throws on use, which is the observable proof that the old
+  // instance really was torn down rather than left holding the database.
+  let oldStoreClosed = false;
+  try {
+    firstApp.store.counts();
+  } catch {
+    oldStoreClosed = true;
+  }
+  check('旧实例的库连接已关闭', oldStoreClosed);
+
+  /* ------------------- a broken config must not take it down ------------------- */
+
+  /*
+   * A database path whose parent is a regular file: `openDatabase` fails with
+   * ENOTDIR while creating the directory, so the replacement cannot be built.
+   * Deliberately a path *inside* the workspace — pointing at /proc would be
+   * intercepted by the file sandbox rather than failing on its own.
+   */
+  const blocker = join(dir, 'not-a-directory');
+  writeFileSync(blocker, 'this is a file, not a directory\n');
+  writeEnv(5, { NAMI_DB_PATH: join(blocker, 'nami.sqlite') });
+  const refused = await lifecycle.restart('broken-config');
+  equal('损坏的配置被拒绝', refused.ok, false);
+  check('拒绝原因非空', (refused.error ?? '') !== '', refused.error ?? '');
+  equal('拒绝后旧实例仍在服务', (await fetchText(`${base}/healthz`)).status, 200);
+  equal('拒绝后配置未被替换', lifecycle.current().config.agent.maxRounds, 5);
+  equal('记录了这次失败的重载', lastReloadResult()?.ok, false);
+
+  // Put a good config back so the HTTP route test below reloads successfully.
+  writeEnv(7);
+
+  /* ---------------------------- the HTTP route ---------------------------- */
+
+  const scheduled = await fetchText(`${base}/admin/api/restart`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${API_KEY}` },
+    body: JSON.stringify({ reason: 'from-smoke' }),
+  });
+  equal('POST /admin/api/restart → 202', scheduled.status, 202);
+
+  // The handler waits 200ms, then reloads; poll for the outcome.
+  let applied = false;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    if (lifecycle.current().config.agent.maxRounds === 7) {
+      applied = true;
+      break;
+    }
+  }
+  check('端点触发的重载最终生效', applied);
+  equal('重载后服务仍可用', (await fetchText(`${base}/healthz`)).status, 200);
+
+  const status = await fetchText(`${base}/admin/api/restart`, {
+    headers: { authorization: `Bearer ${API_KEY}` },
+  });
+  equal('GET /admin/api/restart → 200', status.status, 200);
+  const statusJson = status.json as { restarting?: boolean; available?: boolean; last?: { reason?: string } };
+  equal('状态显示重载器可用', statusJson.available, true);
+  equal('状态未停留在「进行中」', statusJson.restarting, false);
+  equal('状态报告了最后一次原因', statusJson.last?.reason, 'from-smoke');
+
+  await lifecycle.stop();
+}
+
+/** Binds an ephemeral port and returns it, so the fixture does not collide. */
+async function freePort(): Promise<number> {
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', () => resolve()));
+  const address = probe.address();
+  const port = address !== null && typeof address !== 'string' ? address.port : 0;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  return port;
+}
+
+/** Minimal fetch wrapper returning status and parsed JSON. */
+async function fetchText(
+  url: string,
+  init?: RequestInit,
+): Promise<{ status: number; body: string; json: unknown }> {
+  const response = await fetch(url, init);
+  const body = await response.text();
+  let json: unknown = undefined;
+  try {
+    json = body === '' ? undefined : JSON.parse(body);
+  } catch {
+    json = undefined;
+  }
+  return { status: response.status, body, json };
+}
+
+/**
+ * The dedicated WebSocket token.
+ *
+ * The security-relevant half is not "the token connects" but "nothing else
+ * does": once `NAMI_WS_TOKEN` is set, an API key must stop working on `/ws`, and
+ * the token must grant nothing on `/v1/*` or `/admin/api/*`. It must also never
+ * come back out of the config endpoints.
+ */
+async function testWebSocketToken(): Promise<void> {
+  section('WebSocket 专用令牌');
+
+  const plain = await startServer('ws-open', {});
+  equal('未配置时 ws.token 为空', plain.config.ws.token, null);
+
+  const token = 'ws_secret_token_abc123';
+  const guarded = await startServer('ws-token', { NAMI_WS_TOKEN: token });
+  equal('配置后 ws.token 生效', guarded.config.ws.token, token);
+
+  const withToken = await wsConnect(
+    guarded,
+    token,
+    (send) => send({ type: 'ping' }),
+    (message) => message.type === 'pong',
+  );
+  check(
+    'WS 令牌可以建立连接',
+    withToken.messages.some((message) => message.type === 'ready'),
+  );
+
+  let apiKeyRejected = false;
+  try {
+    await wsConnect(guarded, guarded.key, () => {}, () => false);
+  } catch {
+    apiKeyRejected = true;
+  }
+  check('设置令牌后 API Key 不能再连 WS', apiKeyRejected);
+
+  let wrongTokenRejected = false;
+  try {
+    await wsConnect(guarded, 'ws_wrong_token', () => {}, () => false);
+  } catch {
+    wrongTokenRejected = true;
+  }
+  check('错误的 WS 令牌不能连接', wrongTokenRejected);
+
+  equal(
+    'WS 令牌对 /v1/* 无效 → 401',
+    (await http(guarded, 'GET', '/v1/models', { key: token })).status,
+    401,
+  );
+  // With an admin token configured, any other credential is refused with 403
+  // rather than 401 — either way it is refused, which is the point.
+  const adminAttempt = await http(guarded, 'GET', '/admin/api/overview', { key: token });
+  check(
+    'WS 令牌对 /admin/api/* 被拒绝',
+    adminAttempt.status === 401 || adminAttempt.status === 403,
+    String(adminAttempt.status),
+  );
+
+  const admin = { key: null, adminToken: ADMIN_TOKEN };
+  const config = await http(guarded, 'GET', '/admin/api/config', admin);
+  const configRaw = JSON.stringify(config.json);
+  equal('配置接口可读（否则下面的不回显断言会空过）', config.status, 200);
+  check('配置接口不回显 WS 令牌', !configRaw.includes(token), configRaw.slice(0, 120));
+  equal(
+    '配置接口报告令牌已配置',
+    (config.json as { config?: { ws?: { token?: { configured?: boolean } } } })?.config?.ws?.token
+      ?.configured,
+    true,
+  );
+
+  const schema = await http(guarded, 'GET', '/admin/api/config/schema', admin);
+  const field = (
+    schema.json as { fields?: Array<{ key: string; secret: boolean; value: unknown; configured?: boolean }> }
+  ).fields?.find((entry) => entry.key === 'NAMI_WS_TOKEN');
+  equal('schema 里 NAMI_WS_TOKEN 标记为密钥', field?.secret, true);
+  equal('schema 里不回显令牌值', field?.value, null);
+  equal('schema 里 configured=true', field?.configured, true);
+}
+
+/**
+ * WebSocket token management endpoints.
+ *
+ * Uses a fixture whose `NAMI_ENV_PATH` points at a temp file — the same guard the
+ * config-editor test uses, because these endpoints *write `.env`* and a careless
+ * fixture would rewrite the developer's real one.
+ */
+async function testWsTokenAdmin(): Promise<void> {
+  section('WebSocket 令牌管理接口');
+
+  /*
+   * A directory whose `.env` is the file under test. It has to be *named* `.env`
+   * because that is the name the loader reads, while `NAMI_ENV_PATH` tells the
+   * endpoints where to write — pointing both at the same file is what makes the
+   * round trip meaningful.
+   */
+  const dir = join(DATA_DIR, `ws-token-${process.pid}`);
+  mkdirSync(dir, { recursive: true });
+  const envPath = join(dir, '.env');
+  writeFileSync(envPath, '# smoke\n');
+  const fixture = await startServer('ws-admin', {
+    NAMI_ENV_PATH: envPath,
+    NAMI_API_KEYS: API_KEY,
+  });
+  const admin = { key: null, adminToken: ADMIN_TOKEN };
+
+  const initial = await http(fixture, 'GET', '/admin/api/ws', admin);
+  equal('状态接口 → 200', initial.status, 200);
+  equal('初始未配置令牌', (initial.json as { tokenConfigured?: boolean })?.tokenConfigured, false);
+  equal('状态接口报出路径', (initial.json as { path?: string })?.path, '/ws');
+
+  equal(
+    '生成令牌缺少确认 → 400',
+    (await http(fixture, 'POST', '/admin/api/ws/token', { ...admin, json: {} })).status,
+    400,
+  );
+
+  const generated = await http(fixture, 'POST', '/admin/api/ws/token', {
+    ...admin,
+    json: { confirm: true },
+  });
+  equal('生成令牌 → 201', generated.status, 201);
+  const token = (generated.json as { token?: string })?.token ?? '';
+  check('返回的令牌形如 nami_ws_…', /^nami_ws_[A-Za-z0-9_-]{20,}$/.test(token), token);
+  check('令牌已写入 .env', readFileSync(envPath, 'utf8').includes(`NAMI_WS_TOKEN=${token}`));
+
+  /*
+   * A running instance does not re-read `.env` by itself — that is the hot-reload
+   * watcher's job, and fixtures built with `bootstrap()` have none. So the value
+   * is checked the way a restart would see it: by loading the file again.
+   */
+  equal('重新读取 .env 后令牌生效', loadConfig({ cwd: dir, reload: true }).ws.token, token);
+
+  // The token is returned exactly once; the read paths must never echo it.
+  const after = await http(fixture, 'GET', '/admin/api/ws', admin);
+  check('状态接口不回显令牌', !JSON.stringify(after.json).includes(token));
+  const configRaw = JSON.stringify((await http(fixture, 'GET', '/admin/api/config', admin)).json);
+  check('配置接口不回显令牌', !configRaw.includes(token));
+
+  equal(
+    '移除令牌缺少确认 → 400',
+    (await http(fixture, 'DELETE', '/admin/api/ws/token', { ...admin, json: {} })).status,
+    400,
+  );
+  const removed = await http(fixture, 'DELETE', '/admin/api/ws/token', {
+    ...admin,
+    json: { confirm: true },
+  });
+  equal('移除令牌 → 200', removed.status, 200);
+  const envAfter = readFileSync(envPath, 'utf8');
+  check('键被清空而不是留下旧值', !envAfter.includes(token), envAfter.slice(0, 200));
+  check('键仍然存在（留空即关闭）', envAfter.includes('NAMI_WS_TOKEN='));
+
+  equal('清空后重新读取即为未配置', loadConfig({ cwd: dir, reload: true }).ws.token, null);
+}
+
 /* ------------------------------------------------------------------ *
  * Entry point
  * ------------------------------------------------------------------ */
@@ -3508,6 +4278,10 @@ async function main(): Promise<void> {
     testConfigHygiene();
     await testLogsAndConfig();
     await testRateLimitAndLimits();
+    await testConsoleAccounts();
+    await testHotReload();
+    await testWebSocketToken();
+    await testWsTokenAdmin();
   } catch (error) {
     failures.push({
       name: 'unexpected exception',

@@ -73,6 +73,15 @@ export interface LogBusOptions {
    * UI can filter further at read time.
    */
   captureLevel?: LogLevel;
+  /**
+   * History carried over from a previous bus.
+   *
+   * A hot reload rebuilds the whole server, and a fresh bus would leave the
+   * console's log page blank at the exact moment an operator wants to see why it
+   * reloaded. Seeding keeps the trail; `capacity` and `captureLevel` still come
+   * from the new configuration, so changing those takes effect.
+   */
+  seed?: readonly LogEntry[];
 }
 
 export class LogBus {
@@ -86,6 +95,19 @@ export class LogBus {
   constructor(options: LogBusOptions = {}) {
     this.capacityLimit = Math.max(50, options.capacity ?? 1000);
     this.captureLevel = options.captureLevel ?? 'info';
+
+    if (options.seed !== undefined && options.seed.length > 0) {
+      // Keep the newest entries that fit, and continue numbering after them so
+      // the SSE resume cursor stays monotonic across a reload.
+      const seed = options.seed.slice(Math.max(0, options.seed.length - this.capacityLimit));
+      this.entries.push(...seed);
+      this.seq = seed[seed.length - 1]?.seq ?? 0;
+    }
+  }
+
+  /** A copy of the buffered entries, for handing to a replacement bus. */
+  snapshot(): LogEntry[] {
+    return [...this.entries];
   }
 
   /** Whether an entry at this level should be buffered. */

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Nami">
+  <!--
+    Nami's favicon: the wave mark from integrations/astrbot_plugin_nami/logo.png
+    redrawn as a vector so it stays crisp at 16px and costs a few hundred bytes.
+    Referenced by webui/index.html as ./favicon.svg and copied verbatim into the
+    committed build at src/web/app/favicon.svg.
+  -->
+  <defs>
+    <linearGradient id="nami-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#152238" />
+      <stop offset="1" stop-color="#2f5c9e" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#nami-bg)" />
+  <g fill="#ffffff">
+    <rect x="18" y="11" width="7" height="29" />
+    <rect x="39" y="11" width="7" height="29" />
+    <path d="M21 11 h10 l12 29 h-10 z" />
+  </g>
+  <g fill="none" stroke-linecap="round">
+    <path d="M3 46 C13 40 21 52 32 46 S 53 40 61 46" stroke="#8fb8e8" stroke-width="3.2" />
+    <path d="M3 54 C13 48 21 60 32 54 S 53 48 61 54" stroke="#c3dcf6" stroke-width="2.6" />
+  </g>
+</svg>

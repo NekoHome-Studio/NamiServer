@@ -630,7 +630,7 @@ function hintZh(hint: string): string {
       mention: '默认规则下，群消息必须 @ 了机器人才算；私聊一律视为对机器人说。',
       prefix: `需要以配置的前缀（${status.value?.inbound.prefix || '空'}）开头。`,
       none: 'trigger=none 表示永不触发。',
-      all: 'trigger=all 时这条不该出现，请检查配置是否已重启生效。',
+      all: 'trigger=all 时这条不该出现，请确认配置已生效（保存后约 1 秒自动热重载）。',
     };
     return `消息没有命中触发规则（trigger=${trigger}）。${detail[trigger] ?? ''}`;
   }

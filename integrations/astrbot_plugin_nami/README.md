@@ -21,6 +21,7 @@ Nami 对外暴露 `/v1/models`、`/v1/chat/completions`、`/healthz`、`/readyz`
 | `/nami 工具` | 列出 `/admin/api/tools` 中每个工具的危险等级与启用状态 |
 | `/nami 重置` | 忘掉当前作用域的 Nami 会话，下一轮开启新会话 |
 | `/nami 诊断` | 五步体检：配置 → `/healthz` → `/readyz` → `/v1/models` → 一次最小对话探测 |
+| Agent 模式（可选） | 走 `/v1/agent/run`，让 Nami **真正调用工具**（计算、时间、记忆…）后再回答，而不是让模型心算。默认关闭，见第 3.1 节 |
 | 自动回复（可选） | 命中触发条件时把消息转发给 Nami 并回复。**默认关闭**，见第 7 节 |
 | Dashboard 页面 | `pages/nami`：状态卡片、模型目录、工具列表、会话管理、直接提问框，5 秒自动刷新 |
 
@@ -69,7 +70,10 @@ Nami 对外暴露 `/v1/models`、`/v1/chat/completions`、`/healthz`、`/readyz`
 | `nami_api_key` | string（secret） | 空 | 对应 Nami 的 `NAMI_API_KEYS` 之一。留空时 Nami 会返回 401 `missing_api_key` |
 | `nami_admin_token` | string（secret） | 空 | 对应 `NAMI_ADMIN_TOKEN`，`/admin/api/*` 需要。Nami 未配置管理令牌时留空 |
 | `default_model` | string | 空 | 留空 = 由 Nami 自己选择默认模型；填写时必须出现在 `/v1/models` 里 |
-| `request_timeout` | int | `60` | 单次请求超时（秒） |
+| `request_timeout` | int | `60` | 单次请求超时（秒）。**仅对话模式用** |
+| `agent_mode` | bool | `false` | 开启后走 `/v1/agent/run`：Nami 会**真正调用工具**（计算、时间、记忆等）。代价是慢得多——每轮工具调用都是一次额外推理，CPU 上单次可能 10~30 秒。见第 3.1 节 |
+| `agent_timeout` | int | `180` | 仅 `agent_mode` 时生效。工具循环要跑多轮推理，比普通对话慢得多；设太小会在工具跑完前就超时 |
+| `agent_show_tools` | bool | `true` | 仅 `agent_mode` 时生效。在回复末尾附一行「（本轮调用工具：calc）」，便于确认工具真的被调用 |
 | `system_prompt` | text | 空 | 可选的附加 system 提示词，会加在本轮提问之前 |
 | `session_scope` | string | `group` | `user` → `astrbot:user:<sender_id>`；`group` → `astrbot:group:<group_id>`（私聊回退到 user）；`global` → `astrbot:global` |
 | `enable_commands` | bool | `true` | 关闭后 `/nami` 指令组只提示已禁用 |
@@ -82,6 +86,27 @@ Nami 对外暴露 `/v1/models`、`/v1/chat/completions`、`/healthz`、`/readyz`
 
 两个密钥字段都标了 `"secret": true`，WebUI 会用密码框显示。注意：**这只是界面遮罩，不会加密配置文件**，
 插件也绝不会把密钥写进日志或返回给浏览器。
+
+### 3.1 两种模式：对话 vs Agent
+
+| | 对话模式（默认） | Agent 模式 |
+| --- | --- | --- |
+| 走哪个接口 | `POST /v1/chat/completions` | `POST /v1/agent/run` |
+| 会不会调用工具 | ❌ 纯对话 | ✅ 模型 → 工具 → 回灌 → 再问 |
+| Nami 的系统提示词 | 不注入 | 注入 `NAMI_SYSTEM_PROMPT` |
+| 会话怎么带 | 请求头 `X-Nami-Session` | 请求体 `sessionId`（插件自动记回） |
+| 速度 | 快（一次推理） | 慢（每轮工具一次推理） |
+
+**默认是对话模式**，因为它快且可预测。开启 `agent_mode` 后，QQ 里说「计算 12*(3+4)」这类事情才会**真的被算出来**，而不是靠模型自己心算。
+
+开之前先想清楚两件事：
+
+1. **延迟**。一次工具调用至少两次模型推理。CPU 上的 3B 模型单轮就要几秒到几十秒，群里体感会很慢；`agent_timeout` 默认 180 秒就是为此放宽的。
+2. **工具是 Nami 那侧的工具**。包括 `calc`、`now`、`memory_*`、`server_info` 等。Nami 的 OneBot 发送工具（发群/发私聊）**不应该**在这条路上用——回复该由 AstrBot 发出去。
+
+建议：先用 `/nami 诊断` 确认模式字段显示为「Agent（可用工具）」，再用 `/nami 问 计算 12*(3+4)` 看回复末尾有没有「本轮调用工具：calc」。
+
+---
 
 ---
 

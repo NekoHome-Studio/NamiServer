@@ -57,7 +57,11 @@ export function registerConfigRoutes(router: Router, deps: AppDeps): void {
       groups: CONFIG_GROUPS,
       fields: describeConfig(config),
       envFile: { path: config.envPath, exists, writable },
-      note: '所有修改都写入 .env，需要重启 Nami 才会生效（本服务不做热重载）。',
+      note:
+        '所有修改都写入 .env。默认开启热重载：文件一变就会自动原地重载（约 1 秒，期间连接会被短暂拒绝），' +
+        '所以绝大多数修改保存后即生效。' +
+        '改 NAMI_HOST / NAMI_PORT 会重新绑定监听，当前页面需要按新地址重连。' +
+        '注意：热重载只重读配置，不会重新加载代码——改了 .ts 源文件仍需重启进程。',
     });
   });
 
@@ -157,9 +161,17 @@ export function registerConfigRoutes(router: Router, deps: AppDeps): void {
       object: 'config.saved',
       written: config.envPath,
       applied,
-      // Stated explicitly rather than left for the operator to discover.
+      /*
+       * Kept for API compatibility, and it is still true in the sense that the
+       * new values are not live yet: they arrive with the reload, which the
+       * `.env` watcher triggers on its own. `hotReload` tells the console
+       * whether to wait for that or to offer the restart button.
+       */
       restartRequired: true,
-      note: `已写入 ${config.envPath}。重启 Nami 后生效。`,
+      hotReload: config.hotReload,
+      note: config.hotReload
+        ? `已写入 ${config.envPath}。检测到变化后会自动热重载，通常 1 秒内生效。`
+        : `已写入 ${config.envPath}。热重载已关闭（NAMI_HOT_RELOAD=false），请点「重启」使其生效。`,
     });
   });
 }

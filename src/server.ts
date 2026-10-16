@@ -13,18 +13,22 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
 import type { AppDeps } from './app.ts';
 import { asObject, parseJsonBody, readRawBody } from './http/body.ts';
-import { authenticate, authenticateAdmin, maskKey } from './http/auth.ts';
+import { authenticate, authenticateAdmin, authenticateOptional, maskKey } from './http/auth.ts';
+import type { SessionResolution } from './http/auth.ts';
 import { HttpError, applyCors, sendError, sendJson, sendText } from './http/response.ts';
 import { Router } from './http/router.ts';
 import type { AuthInfo, RequestContext } from './http/types.ts';
+import { hashSessionToken } from './auth/tokens.ts';
 import { registerAdminRoutes } from './routes/admin.ts';
 import { registerAgentRoutes } from './routes/agent.ts';
+import { registerAuthRoutes } from './routes/auth.ts';
 import { registerConfigRoutes } from './routes/config.ts';
 import { registerHealthRoutes } from './routes/health.ts';
 import { registerLogRoutes } from './routes/logs.ts';
 import { registerOneBotRoutes } from './routes/onebot.ts';
 import { registerOpenAiRoutes } from './routes/openai.ts';
 import { registerSessionRoutes } from './routes/sessions.ts';
+import { registerWsRoutes } from './routes/ws.ts';
 import { buildOpenApiDocument } from './openapi.ts';
 import { readAppAsset, readAppIndex } from './web/app.ts';
 import { getDocsHtml, getPanelHtml } from './web/panel.ts';
@@ -40,9 +44,14 @@ export interface NamiServer {
 
 const ANONYMOUS: AuthInfo = { key: 'anonymous', via: 'none', isAdmin: false };
 
-function needsAuth(pathname: string): 'api' | 'admin' | null {
+function needsAuth(pathname: string): 'api' | 'admin' | 'optional' | null {
   if (pathname === '/v1' || pathname.startsWith('/v1/')) return 'api';
-  if (pathname.startsWith('/admin/api')) return 'admin';
+  if (pathname.startsWith('/admin/api')) {
+    // The login endpoints cannot require a session — obtaining one is the point.
+    // They are not simply public either: `/me` and `logout` must still *resolve*
+    // a session when one is present, so they use the optional tier.
+    return PUBLIC_ADMIN_PATHS.has(pathname) ? 'optional' : 'admin';
+  }
   return null;
 }
 
@@ -51,6 +60,13 @@ function needsAuth(pathname: string): 'api' | 'admin' | null {
  * request headers — so these, and only these, also accept `?key=`.
  */
 const QUERY_AUTH_ADMIN_PATHS = new Set(['/admin/api/logs/stream']);
+
+/** Reachable without any credential, by definition. */
+const PUBLIC_ADMIN_PATHS = new Set([
+  '/admin/api/auth/login',
+  '/admin/api/auth/logout',
+  '/admin/api/auth/me',
+]);
 
 export function createNamiServer(deps: AppDeps): NamiServer {
   const { config, log, metrics, limiter } = deps;
@@ -64,22 +80,76 @@ export function createNamiServer(deps: AppDeps): NamiServer {
   registerOneBotRoutes(router, deps);
   registerLogRoutes(router, deps);
   registerConfigRoutes(router, deps);
+  // Registered before the other admin routes so `/admin/api/auth/*` can never be
+  // shadowed by a parameterised pattern.
+  registerAuthRoutes(router, deps);
+  registerWsRoutes(router, deps);
   registerAdminRoutes(router, deps, () => router.describe());
+
+  /**
+   * Turns a session cookie into an authenticated caller.
+   *
+   * The store owns expiry and the disabled flag, so a session that outlives its
+   * TTL or belongs to an account that was switched off is rejected here without
+   * this file having to remember either rule. `last_seen_at` slides on use.
+   */
+  const resolveSession = (token: string): SessionResolution | null => {
+    const hash = hashSessionToken(token);
+    const found = deps.store.findAuthSession(hash);
+    if (!found) return null;
+    deps.store.touchAuthSession(hash);
+    return {
+      user: {
+        id: found.user.id,
+        username: found.user.username,
+        isAdmin: found.user.isAdmin,
+      },
+      sessionTokenHash: hash,
+    };
+  };
 
   // Pages and the machine-readable spec are all unauthenticated: they contain no
   // data, and API consumers need the contract before they have a key.
-  const htmlHeaders = (): Record<string, string> => ({
+
+  /**
+   * CSP for the **self-contained** documents (`/admin/classic`, `/docs`).
+   *
+   * Both carry every byte of their JS and CSS inline, so `'unsafe-inline'` is
+   * exactly what they need and nothing else. `default-src 'none'` then stops
+   * them from pulling in any external resource at all.
+   */
+  const inlineHtmlHeaders = (): Record<string, string> => ({
     'cache-control': 'no-cache',
     'content-security-policy':
       "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'",
     'x-content-type-options': 'nosniff',
   });
 
+  /**
+   * CSP for the **built WebUI** at `/admin`.
+   *
+   * This one must differ from {@link inlineHtmlHeaders}, because the SPA is its
+   * exact opposite: `index.html` pulls its JS and CSS from external files under
+   * `/admin/assets/`. Serving it with the inline-only policy silently blocked
+   * the module script and the stylesheet in every browser — a blank page that
+   * neither curl (which does not evaluate CSP) nor a status-code assertion can
+   * see. Hence `'self'` in both `script-src` and `style-src`.
+   *
+   * `style-src` keeps `'unsafe-inline'` on purpose: Vuetify writes the active
+   * theme's CSS variables into a `<style>` element at runtime.
+   */
+  const spaHtmlHeaders = (): Record<string, string> => ({
+    'cache-control': 'no-cache',
+    'content-security-policy':
+      "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'",
+    'x-content-type-options': 'nosniff',
+  });
+
   const serveClassicPanel = (ctx: RequestContext): void => {
-    sendText(ctx.res, 200, getPanelHtml(), 'text/html; charset=utf-8', htmlHeaders());
+    sendText(ctx.res, 200, getPanelHtml(), 'text/html; charset=utf-8', inlineHtmlHeaders());
   };
   const serveDocs = (ctx: RequestContext): void => {
-    sendText(ctx.res, 200, getDocsHtml(), 'text/html; charset=utf-8', htmlHeaders());
+    sendText(ctx.res, 200, getDocsHtml(), 'text/html; charset=utf-8', inlineHtmlHeaders());
   };
 
   // The classic single-file panel stays reachable at /admin/classic. It is both
@@ -109,7 +179,7 @@ export function createNamiServer(deps: AppDeps): NamiServer {
     if (indexHtml === null) return false; // no build: let the router 404
 
     if (path === '/admin' || path === '/admin/') {
-      sendText(res, 200, indexHtml, 'text/html; charset=utf-8', htmlHeaders());
+      sendText(res, 200, indexHtml, 'text/html; charset=utf-8', spaHtmlHeaders());
       return true;
     }
 
@@ -122,7 +192,7 @@ export function createNamiServer(deps: AppDeps): NamiServer {
         sendError(res, 404, `No such asset: ${path}`, { code: 'not_found' });
         return true;
       }
-      sendText(res, 200, indexHtml, 'text/html; charset=utf-8', htmlHeaders());
+      sendText(res, 200, indexHtml, 'text/html; charset=utf-8', spaHtmlHeaders());
       return true;
     }
 
@@ -218,16 +288,25 @@ export function createNamiServer(deps: AppDeps): NamiServer {
         return;
       }
 
+      const authOptions = {
+        allowQuery: QUERY_AUTH_ADMIN_PATHS.has(url.pathname),
+        resolveSession,
+        cookieName: config.auth.cookieName,
+      };
       const authKind = needsAuth(url.pathname);
       if (authKind === 'api') {
-        auth = authenticate(config, req, url);
+        auth = authenticate(config, req, url, authOptions);
       } else if (authKind === 'admin') {
-        auth = authenticateAdmin(config, req, url, {
-          allowQuery: QUERY_AUTH_ADMIN_PATHS.has(url.pathname),
-        });
+        auth = authenticateAdmin(config, req, url, authOptions);
+      } else if (authKind === 'optional') {
+        // Login endpoints: resolve a session when there is one, but never fail.
+        auth = authenticateOptional(config, req, url, authOptions);
       }
 
-      if (authKind !== null && limiter.enabled) {
+      // Unauthenticated calls to the optional tier are not rate-limited: the
+      // console polls `/me`, and charging those to the anonymous bucket would
+      // throttle a signed-out browser for no benefit.
+      if ((authKind === 'api' || authKind === 'admin') && limiter.enabled) {
         const decision = limiter.check(auth.key);
         res.setHeader('x-ratelimit-limit', String(decision.limit));
         res.setHeader('x-ratelimit-remaining', String(decision.remaining));
@@ -259,9 +338,16 @@ export function createNamiServer(deps: AppDeps): NamiServer {
 
       routeLabel = matched.pattern;
 
-      // Bodies are read only after a route matched, so 404s stay cheap.
+      /*
+       * Bodies are read only after a route matched, so 404s stay cheap.
+       *
+       * DELETE is included because the destructive admin endpoints take their
+       * `confirm: true` flag in the body, same as POST/PUT — without this a
+       * `DELETE /admin/api/ws/token` could never be confirmed and would always
+       * answer 400. A body-less DELETE still resolves immediately.
+       */
       let rawBody = '';
-      if (method === 'POST' || method === 'PUT' || method === 'PATCH') {
+      if (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
         try {
           rawBody = await readRawBody(req, config.maxBodyBytes);
           metrics.recordBytesIn(Buffer.byteLength(rawBody));

@@ -167,6 +167,9 @@
         </v-col>
       </v-row>
 
+      <!-- WebSocket 接入：状态 + 专用令牌的生成/轮换/移除 -->
+      <WsAccessCard />
+
       <!-- 运行时信息 -->
       <DashboardRuntimeCard class="mt-4" :overview="overview" :health="health" />
     </AsyncSection>
@@ -187,6 +190,7 @@ import type {
 import AsyncSection from '@/components/AsyncSection.vue';
 import DashboardRecentRuns from '@/components/DashboardRecentRuns.vue';
 import DashboardRuntimeCard from '@/components/DashboardRuntimeCard.vue';
+import WsAccessCard from '@/components/WsAccessCard.vue';
 import PageHeader from '@/components/PageHeader.vue';
 import StatCard from '@/components/StatCard.vue';
 import {

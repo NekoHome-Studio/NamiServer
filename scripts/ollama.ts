@@ -33,6 +33,49 @@ const c = {
 /** Models that handle tool calling well; the first is the recommended default. */
 const RECOMMENDED = ['qwen2.5:7b', 'llama3.1:8b', 'mistral-nemo', 'qwen3:8b'];
 
+/**
+ * Which model `--write` should record.
+ *
+ * The order matters here, and one case is a bug fix. A model that was **just
+ * pulled** outranks whatever is already in `.env`: previously the configured name
+ * won unconditionally, so on a fresh checkout
+ * `npm run ollama -- --pull qwen2.5:3b --write` wrote the placeholder
+ * `nami-mock-1` — a name Ollama has never heard of — *and* the script printed a
+ * warning that it was not installed on its way to doing it. The pull is the
+ * operator stating an intent, and it should not be discarded silently.
+ *
+ * An explicit `--model` still wins over everything, because it is the most
+ * specific instruction — even when the name is not installed, which the caller
+ * reports.
+ */
+export function selectModel(input: {
+  requested: string | null;
+  configured: string;
+  installed: readonly string[];
+  /** The `--pull` target, when it is installed after the pull. */
+  justPulled: string | null;
+}): { model: string; note: string } {
+  const requested = input.requested?.trim() ?? '';
+  if (requested !== '') return { model: requested, note: '' };
+
+  const configured = input.configured.trim();
+  if (input.justPulled !== null && input.justPulled !== configured) {
+    return { model: input.justPulled, note: `采用刚拉取的模型：${input.justPulled}` };
+  }
+  if (configured !== '') {
+    return {
+      model: configured,
+      note: input.installed.includes(configured) ? '' : `已配置的模型 ${configured} 尚未安装`,
+    };
+  }
+
+  const recommended = RECOMMENDED.find((name) => input.installed.includes(name));
+  if (recommended !== undefined) {
+    return { model: recommended, note: `自动选择推荐模型：${recommended}` };
+  }
+  return { model: input.installed[0] ?? '', note: '' };
+}
+
 interface Args {
   url: string | null;
   pull: string | null;
@@ -239,20 +282,23 @@ async function main(): Promise<void> {
   /* ------------------------------ selection ------------------------------ */
 
   const names = models.map((model) => model.id);
-  let selected = args.model?.trim() || config.llm.model.trim();
+  const choice = selectModel({
+    requested: args.model,
+    configured: config.llm.model,
+    installed: names,
+    // `pullTarget` is only non-null when the pull actually ran or was already
+    // satisfied, so its presence here means "this model is installed now".
+    justPulled: pullTarget !== null && names.includes(pullTarget) ? pullTarget : null,
+  });
+  const selected = choice.model;
 
-  if (selected !== '' && !names.includes(selected)) {
-    if (!args.json) {
-      process.stdout.write(
-        `  ${c.yellow}⚠${c.reset} 指定的模型 ${c.bold}${selected}${c.reset} 未安装（Ollama 会在首次请求时报错）。\n`,
-      );
-    }
+  if (selected !== '' && !names.includes(selected) && !args.json) {
+    process.stdout.write(
+      `  ${c.yellow}⚠${c.reset} 指定的模型 ${c.bold}${selected}${c.reset} 未安装（Ollama 会在首次请求时报错）。\n`,
+    );
   }
-
-  if (selected === '') {
-    selected = names.includes(RECOMMENDED[0] as string)
-      ? (RECOMMENDED[0] as string)
-      : (names[0] ?? '');
+  if (!args.json && choice.note !== '') {
+    process.stdout.write(`  ${c.dim}${choice.note}${c.reset}\n`);
   }
 
   /* -------------------------------- report ------------------------------- */

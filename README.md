@@ -6,25 +6,38 @@
 - 🐾 **一站式中转免费模型**：`npm run ofm -- --write` 接上 [dsh-our-free-model](https://github.com/)（OFM）的本地网关，把它的免费模型目录托管成你自己的 OpenAI 兼容端点——客户端只管换成 `model` 名字，路由、别名、会话与工具循环都在 Nami 这一层
 - 🌐 **像 OpenAI 一样托管**：按请求 `model` 路由、别名映射（`gpt-4o-mini=qwen2.5:7b`）、模型白名单、上游不可达时优雅降级
 - 💬 **接入 QQ**：内置 OneBot v11 连接器，对接 SnowLuma / NapCat / LLOneBot；入站按 @ 或前缀触发、每个群独立会话，出站工具带发送白名单
-- 🤖 **接入 AstrBot**：附完整插件 `integrations/astrbot_plugin_nami/`（指令直连 + Dashboard 控制台 + 448 项离线自检）；也可以不装插件，直接把 Nami 配成 AstrBot 的 OpenAI 兼容提供商；免费模型另有 `astrbot_plugin_our_free_model`（默认就走 Nami 中转）
+- 🤖 **接入 AstrBot（管 QQ 推荐走这条）**：附完整插件 `integrations/astrbot_plugin_nami/`（指令直连 + Dashboard 控制台 + 484 项离线自检）；也可以不装插件，直接把 Nami 配成 AstrBot 的 OpenAI 兼容提供商；**免费模型**另有 `astrbot_plugin_our_free_model`（默认就走 Nami 中转）
 - 🧩 **可插拔 LLM 适配器**：`ollama` 原生适配器、`openai` 兼容任意 `/chat/completions` 端点、`ofm` 中转免费模型网关、`mock` 完全离线可用
 - 🛠️ **带沙箱的工具调用循环**：JSON Schema 参数校验、超时、结果截断、危险工具默认关闭
 - 🔌 **三通道接入**：OpenAI 兼容 REST、原生 SSE 事件流、WebSocket 双向控制
 - 💾 **SQLite 会话持久化**：会话、消息、运行记录、工具调用、会话级 KV
-- 🔐 **API Key 鉴权 + 令牌桶限流**，密钥常量时间比较
+- 🔐 **控制台账号密码登录**：账号存 SQLite、密码 scrypt 哈希、登录态走 HttpOnly Cookie；连续失败按用户名与来源地址分别锁定。程序化调用继续用 **API Key**（常量时间比较 + 令牌桶限流）。
+- ♻️ **配置热重载 + 原地重启**：监听 `.env`，改动后自动原地重建全部服务（进程不退出）；顶栏有重启按钮。**先建新实例、成功才切换**，所以写错配置不会把服务弄挂。只重读**配置**——改了 `.ts` 源文件仍需重启进程
 - 🖥️ **Web 管理面板** + **OpenAPI 3.1 规范**（`/openapi.json`、`/docs`）
 - 📦 **运行时零依赖**：`dependencies` 为 `{}`，无构建步骤，直接 `node src/index.ts`
-- 🐳 **Docker 一键部署**：非 root 运行，`/app/data` 数据卷
+- 🐳 **Docker 一键部署**：非 root 运行，`/app/data` 数据卷（**本项目未使用，镜像未构建/未验证**）
 
 > 🚚 **要把这份代码搬到 Linux 上部署或继续开发？** 先读 **[HANDOVER.md](HANDOVER.md)**。
 > 它写明了哪些内容已经在真实环境验证过、哪些只有静态检查、哪些从未验证，以及一份 15 分钟的验收清单。
-> 一句话：**这份代码从未在 Linux 上运行过，Docker 镜像也从未构建过。**
+> 一句话（2026-10-06 更新）：**这份代码已在真实 Linux 上跑通验收清单的 ①—④**（类型检查 / smoke / 插件自检 / 真实启动与全部通道），
+> 详细记录见 `HANDOVER.md` 与 `docs/linux-acceptance-2026-10-06.md`；
+> **本项目不使用 Docker**，故 Docker 相关章节（下文的「Docker 部署」与仓库里的 `Dockerfile`）保留但**未经验证**。
 
 ---
 
 ## WebUI 控制台
 
-浏览器打开 **`http://<主机>:8787/admin`**，输入 `NAMI_API_KEYS` 中的任意一个（或 `NAMI_ADMIN_TOKEN`）即可。
+浏览器打开 **`http://<主机>:8787/admin`**，用**账号密码**登录。
+
+首次启动且数据库里还没有账号时，Nami 会自动建一个：`NAMI_ADMIN_USER`（默认 `admin`）配 `NAMI_ADMIN_PASSWORD`；没设密码就随机生成一把并**只在启动横幅里打印一次**。忘了密码或想加账号，在服务器上执行：
+
+```bash
+npm run passwd -- --list                        # 看看有哪些账号
+npm run passwd -- --user admin --generate       # 重置密码（打印一次）
+npm run passwd -- --add alice --password '...'  # 新建普通账号（加 --admin 建管理员）
+```
+
+登录态保存在 **HttpOnly Cookie** 里（`SameSite=Strict`，页面脚本读不到），所以控制台不再把任何长期凭证放进 `localStorage`。没有账号时也可以在登录页切到「API Key」用 `NAMI_API_KEYS` 进入；`/v1/*` 始终可以用 API Key。
 
 十个页面：**登录 · 仪表盘 · 对话 · 会话 · 模型 · 工具 · OneBot/QQ · 配置 · 日志 · API 文档**。
 
@@ -46,7 +59,7 @@ src/web/app/            ← 编译产物，已提交进仓库
 <summary>几个页面值得单独说明</summary>
 
 - **对话**：流式对话，并且把**工具调用循环可视化**——`tool.call` 到达时插入一张可展开的卡片显示工具名、危险等级与参数，`tool.result` 到达时在同一张卡片上补上成功/失败、耗时与返回内容。这是 Nami 与普通聊天界面真正拉开差距的地方。
-- **配置**：从服务器下发的 schema 动态渲染表单，写回 `.env`。三条硬约束：必须显式确认、只允许写 `NAMI_*`、**任一非法值则整体拒绝**（不会部分写入）。密钥永远读不回——只告诉你"已配置"，写入后回显 `***`。**所有字段都需要重启生效**（本服务不做热重载，界面里也这么写）。
+- **配置**：从服务器下发的 schema 动态渲染表单，写回 `.env`。三条硬约束：必须显式确认、只允许写 `NAMI_*`、**任一非法值则整体拒绝**（不会部分写入）。密钥永远读不回——只告诉你"已配置"，写入后回显 `***`。**保存后默认自动热重载**：Nami 监听 `.env`，文件一变就在原地重建全部服务（约 1 秒，进程不退出），因此绝大多数改动保存即生效；`NAMI_HOST`/`NAMI_PORT` 的变化会重新绑定监听，需要用新地址重连。关掉 `NAMI_HOT_RELOAD` 后改用顶栏的**重启按钮**。
 - **日志**：内存环形缓冲 + SSE 实时流，支持 `Last-Event-ID` 断线续传。**日志在进入缓冲前就已完成脱敏**（按字段名递归屏蔽 `token`/`apiKey`/`authorization` 等），因为一旦进了缓冲，下游每个消费者都已经泄露了。`NAMI_LOG_CAPTURE_LEVEL` 与控制台级别独立——把控制台调安静不应该让日志页也空掉。
 - **OneBot/QQ**：除连接状态与网桥计数外，提供一个**同步模拟事件**面板，不需要真实 QQ 账号就能验证整条入站链路，并直接告诉你被哪一步拦下（`no-trigger` / `from-self` / `group-not-allowed` / `busy` …）。
 
@@ -62,7 +75,7 @@ src/web/app/            ← 编译产物，已提交进仓库
 - **原生 Ollama 适配器**：`llm/ollama.ts` 直接对接 `/api/chat`（NDJSON 流式），而非 OpenAI 兼容层——只有这样才能控制 `num_ctx`、`num_predict` 与 `keep_alive`，且不依赖较新的 Ollama 版本。原生 tool calling 少一层翻译。
 - **像 OpenAI 一样托管**：`llm/router.ts` 让客户端按名字选模型，支持别名映射（把硬编码 `gpt-4o-mini` 的工具指向本地模型）、客户端可见名白名单、自动发现与缓存；探测失败时**不拦截**请求，而是原样转发。
 - **OneBot v11 连接器**：`onebot/` 把 Nami 接到 SnowLuma（或任何 OneBot 实现）。入站端点在过滤后才花钱——`decideEvent` 是个纯函数，因为这里判错要么是「机器人装死」，要么是账单失控。出站发送工具双开关 + 白名单。
-- **AstrBot 插件**：`integrations/astrbot_plugin_nami/` 是独立于本仓库运行时的 Python 插件，带自己的 448 项离线自检；Nami 侧的端到端测试里有一组「外部集成契约」断言钉住它依赖的调用约定。
+- **AstrBot 插件**：`integrations/astrbot_plugin_nami/` 是独立于本仓库运行时的 Python 插件，带自己的 484 项离线自检；Nami 侧的端到端测试里有一组「外部集成契约」断言钉住它依赖的调用约定。
 - **可插拔 LLM 适配器**：`ollama` / `openai`（适配 OpenAI / DeepSeek / Groq / vLLM / LM Studio 等）/ `mock`（离线、确定性、会真的发起工具调用）三种 provider，新增适配器只需实现 `LLMProvider` 接口。
 - **带沙箱的工具调用循环**：`core/agent.ts` 驱动「模型 → 工具 → 回灌 → 再问」的多轮循环，每次工具调用都经过 `tools/sandbox.ts`：启用检查、JSON Schema 参数校验、独立超时（可用运行信号取消）、结果按字节截断。
 - **三通道接入**：OpenAI 兼容 REST（`/v1/chat/completions`、`/v1/models`）+ 原生 SSE（`/v1/agent/run` 事件流）+ WebSocket（`/ws` 双向控制，支持运行中取消）。
@@ -70,7 +83,7 @@ src/web/app/            ← 编译产物，已提交进仓库
 - **API Key 鉴权 + 令牌桶限流**：Bearer Token 常量时间比较，按 key 计费的令牌桶（容量 + 每秒补充），超限返回 `429` 与 `Retry-After`。
 - **Web 管理面板 + API 契约**：`/admin` 可视化面板；`/openapi.json` 是完整的 OpenAPI 3.1 规范，`/docs` 是它的实时渲染，且**由端到端测试校验与实现一致**。
 - **运行时零依赖**：`package.json` 的 `dependencies` 为 `{}`，只用 devDependencies 做类型检查；TypeScript 由 Node 内置的类型剥离直接执行。
-- **Docker 部署**：`node:24-alpine`、非 root 用户、`/app/data` 命名卷、内置 `HEALTHCHECK`。
+- **Docker 部署**：`node:24-alpine`、非 root 用户、`/app/data` 命名卷、内置 `HEALTHCHECK`。**本项目未使用 Docker，镜像未构建、容器内未运行**。
 
 ---
 
@@ -289,8 +302,9 @@ AstrBot 侧用 **[`astrbot_plugin_our_free_model`](../neko-free-model/astrbot_pl
 每个会话独立的历史落在 SQLite 里；以及工具循环与统一的三通道接入。
 代价是多一个进程要活着——所以 `/readyz` 和 `/ofm status` 都是按「能分清是哪一跳断了」来写的。
 
-Docker 部署时 OFM 跑在宿主机：`NAMI_OFM_URL=http://host.docker.internal:18899`
-（Linux 上可能需要 `--add-host=host.docker.internal:host-gateway`），Key 仍走 `NAMI_LLM_API_KEY`。
+本项目的常态是**直接跑进程**（已决定不使用 Docker）。将来真要跑容器时，OFM 在宿主机上：
+`NAMI_OFM_URL=http://host.docker.internal:18899`（Linux 上可能需要
+`--add-host=host.docker.internal:host-gateway`），Key 仍走 `NAMI_LLM_API_KEY`。
 
 ---
 
@@ -472,7 +486,7 @@ cp -r integrations/astrbot_plugin_nami  <AstrBot>/data/plugins/
 
 ```bash
 cd integrations
-python selftest_plugin_nami.py     # ✓ 全部通过 448 项断言
+python selftest_plugin_nami.py     # ✓ 全部通过 484 项断言
 ```
 
 Nami 侧的端到端测试里也有一组**外部集成契约**断言（`scripts/smoke.ts` 的 `testIntegrationContract`），钉住插件依赖的调用约定——包括带冒号的作用域会话 id、以及 URL 编码后的会话删除。改动 Nami 时若破坏了插件所依赖的行为，测试会失败而不是让插件悄悄坏掉。
@@ -725,10 +739,25 @@ NAMI_LLM_MODEL=                          # 留空 = 启动时自动发现并采�
 
 ### 如何鉴权
 
+默认情况下 `/ws` 与 `/v1/*` 共用同一套凭证：
+
 - **非浏览器客户端**：使用标准请求头 `Authorization: Bearer <API_KEY>`。
 - **浏览器**：WebSocket 构造函数 **无法设置请求头**，因此 `/ws` 额外接受 query 参数 —— `?key=<API_KEY>`（也兼容 `?api_key=`）。
-  注意这会出现在访问日志/浏览器历史里，请只在受信网络中使用，或改用服务端代理。
 - 也接受 `X-Admin-Token` 请求头。
+
+**但如果设置了 `NAMI_WS_TOKEN`，`/ws` 就只认这个令牌**（API Key 与 Admin Token 都不再能连）。这是推荐给浏览器的用法：浏览器只能把 WS 凭据放进 URL 查询串，而查询串会进访问日志、代理日志和浏览器历史；把通用 API Key 放进去等于到处撒长期凭证。专用令牌可以**单独轮换**，并且对 `/v1/*`、`/admin/api/*` **完全无效**——泄露了也只能连 WS，且改一行 `.env` 就能作废（保存后自动热重载生效）。
+
+**在控制台里管理**：仪表盘底部有「WebSocket 接入」卡片——显示端点、活跃连接、当前鉴权方式，并可**一键生成/轮换/移除**令牌（新令牌只在生成时显示一次，之后读不回来）。也可以手写 `.env`：
+
+```bash
+# .env
+NAMI_WS_TOKEN=nami_ws_换成一个随机串
+```
+
+```js
+// 浏览器
+const ws = new WebSocket(`ws://<host>:8788/ws?key=${encodeURIComponent(WS_TOKEN)}`);
+```
 
 握手阶段就会被拒绝：未鉴权返回 `401`，同一 key 并发连接超过 `NAMI_WS_MAX_CONNECTIONS_PER_KEY`（默认 8）返回 `429`，路径不对返回 `404`。
 
@@ -865,6 +894,10 @@ NAMI_TOOL_FS_ALLOW_ROOTS=/app/data,/srv/documents
 
 ## Docker 部署
 
+> ⚠️ **2026-10-06：本项目已决定不使用 Docker 部署。** 本节与仓库里的 `Dockerfile` / `docker-compose.yml` 一并保留，
+> 但**镜像从未构建过、容器内也从未运行过**——如果你要用，请把它当作全新的、未验证的东西（HANDOVER.md 第 3 节 ① 与第 5 节是那时的清单）。
+> 本机运行请看上面的「快速开始」：`NAMI_API_KEYS=<key> npm start`。
+
 镜像基于 `node:24-alpine`，**不执行 `npm install`**（运行时零依赖），只有 `package.json`、`src/`、`scripts/` 被复制进镜像，以非 root 用户运行，唯一可写路径是 `/app/data`。
 
 ### 方式一：Docker Compose（推荐）
@@ -958,13 +991,15 @@ npm run webui:dev         # 开发服务器（:5199，自动代理到本机 8787
 npm run webui:build       # 构建并输出到 src/web/app
 ```
 
-冒烟测试共 **394 项断言**，覆盖全部通道与安全边界。其中：
+冒烟测试共 **672 项断言**，覆盖全部通道与安全边界。其中：
 
 - **Ollama** 部分跑在测试内启动的**假 Ollama 守护进程**上，因此不需要真装 Ollama 也能验证：`/api/tags` 发现、NDJSON 流式解析（并故意把一行 JSON 拆到两次 TCP 写入以测试分片缓冲）、原生 tool calling、`num_ctx` / `keep_alive` 透传、别名与白名单策略、以及 Ollama 不可用时的降级行为。
+- **OFM 中转**部分跑在测试内启动的**假 OFM 网关**上：`provider=ofm` 的选择规则与地址规范化、模型发现、SSE 解析与 tool calling 经中转、上游拒绝 `stream_options` 时自动重试、别名与白名单、上游掉线降级，以及接入插件依赖的那组契约（`/v1/models`、非流式 `/v1/chat/completions`、免鉴权的 `/healthz` + `/readyz` 且 `checks.provider=ofm`）。`npm run ofm` 向导的解析与三种探测失败分类也在这里钉住。
 - **OneBot** 部分跑在测试内启动的**假 OneBot 实现**上，覆盖：入站过滤的每一条分支（@/前缀/全部/闭麦、私聊视为对机器人说话、自我循环、群与用户白名单、图片无文字）、上报密钥校验、`204` 先于模型返回、回答经真实 `at` 消息段回发、长回答分片、出站工具的白名单拒绝、以及管理端同步模拟与手动发送。
 - **外部集成契约**部分把 AstrBot 插件依赖的调用约定钉死：带冒号的作用域会话 id 能原样落库与取回、URL 编码后的会话删除、`/readyz` 的 `checks` 字段齐全、以及插件据此给建议的错误码。
+- **控制台与热重载**部分覆盖账号登录（含锁定策略）、`.env` 变更触发原地重建，以及 WebSocket 专用令牌的生成/轮换/移除。
 
-加上 AstrBot 插件自己的 **448 项**离线自检，这个仓库里共有 **842 项**可复现的断言。
+加上 AstrBot 插件自己的 **484 项**离线自检，这个仓库里共有 **1156 项**可复现的断言。
 
 关于 `npm install`：**只有 `npm run typecheck`（和 `npm test` 的类型检查部分）需要它**，因为 `typescript` 与 `@types/node` 是 devDependencies。日常 `npm start` / `npm run dev` / `npm run smoke` 都不需要 `node_modules`，也不会产生 `dist/` 目录 —— 整个项目没有构建产物。
 

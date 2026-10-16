@@ -106,6 +106,17 @@ export interface WsConfig {
   maxPayloadBytes: number;
   heartbeatMs: number;
   maxConnectionsPerKey: number;
+  /**
+   * Dedicated credential for the WebSocket endpoint.
+   *
+   * Unset (the default) keeps the original behaviour: `/ws` shares the API-key
+   * scheme. When set, it becomes the **only** accepted credential there, which is
+   * the point — a browser has to put a WS credential in the query string, and
+   * handing it a general-purpose API key means that key ends up in proxy and
+   * access logs. A WS-only token can be rotated on its own and grants nothing on
+   * `/v1/*` or `/admin/api/*`.
+   */
+  token: string | null;
 }
 
 /** Accepted values for `NAMI_ONEBOT_TRIGGER`. */
@@ -181,6 +192,42 @@ export interface OneBotConfig {
   };
 }
 
+/**
+ * Console account/password authentication.
+ *
+ * API keys keep working for `/v1/*` and for tooling; this section is about the
+ * human logging into the WebUI.
+ */
+export interface AuthConfig {
+  /**
+   * Username seeded on first boot. Only used while the `users` table is empty —
+   * after that the database is authoritative, so removing the variable cannot
+   * silently change (or re-create) an account.
+   */
+  bootstrapUser: string;
+  /**
+   * Plain-text password for that first account. Read once, hashed with scrypt,
+   * and never stored. Empty means "generate a random one and print it", which
+   * keeps a fresh install from coming up with a guessable default.
+   */
+  bootstrapPassword: string;
+  /** How long a console login lasts. */
+  sessionTtlMs: number;
+  cookieName: string;
+  /** `auto` marks the cookie Secure whenever the request looks like HTTPS. */
+  cookieSecure: 'auto' | 'always' | 'never';
+  /**
+   * Trust `X-Forwarded-Proto`. Off by default because any client can send that
+   * header; turn it on only behind a reverse proxy you control.
+   */
+  trustProxy: boolean;
+  /** Failures before a lockout, counted per username and per client address. */
+  maxAttempts: number;
+  lockoutMs: number;
+  /** Failures older than this start a fresh count. */
+  attemptWindowMs: number;
+}
+
 export interface Config {
   version: string;
   host: string;
@@ -202,10 +249,21 @@ export interface Config {
   /** True when auth was auto-generated for a first run. */
   generatedKey: string | null;
 
+  auth: AuthConfig;
+
   corsOrigin: string;
   maxBodyBytes: number;
   requestTimeoutMs: number;
   shutdownGraceMs: number;
+
+  /**
+   * Watch `.env` and rebuild the server in place when it changes.
+   *
+   * On by default: the console's config editor writes `.env`, and having to then
+   * find a shell to restart the process is the kind of friction that leads to
+   * hand-edited files and forgotten restarts.
+   */
+  hotReload: boolean;
 
   dbPath: string;
   /** Absolute path of the `.env` this process would load, exposed for the editor. */
@@ -292,6 +350,13 @@ function envBool(key: string, fallback: boolean): boolean {
   return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
 }
 
+/** Reads one of a fixed set of values; anything else falls back silently. */
+function envEnum<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
+  const raw = process.env[key]?.trim().toLowerCase();
+  if (raw === undefined || raw === '') return fallback;
+  return (allowed as readonly string[]).includes(raw) ? (raw as T) : fallback;
+}
+
 function envList(key: string): string[] {
   const raw = process.env[key];
   if (!raw) return [];
@@ -304,19 +369,64 @@ function envList(key: string): string[] {
 export interface LoadConfigOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Re-read `.env`, discarding the values a previous load took from it.
+   *
+   * Needed for hot reload. `.env` loading only *fills* `process.env` — it never
+   * overwrites an entry — so without this a second load would keep the first
+   * file's values forever and an edit would appear to do nothing.
+   *
+   * Values that came from the real environment (Docker `-e`, a shell export) are
+   * kept and still win, exactly as they did on the first load.
+   */
+  reload?: boolean;
+}
+
+/**
+ * `process.env` as it was before Nami read any `.env`.
+ *
+ * The difference between this and the current environment is precisely "what the
+ * `.env` file put there", which is what a reload has to undo.
+ */
+let pristineEnv: Record<string, string> | undefined;
+
+function rememberPristineEnv(): void {
+  pristineEnv ??= { ...process.env } as Record<string, string>;
+}
+
+/** Drops the keys a previous `.env` load injected, so the file can be re-read. */
+function forgetInjectedEnv(): void {
+  if (pristineEnv === undefined) return;
+  for (const key of Object.keys(process.env)) {
+    if (!key.startsWith('NAMI_')) continue;
+    if (key in pristineEnv) continue;
+    delete process.env[key];
+  }
 }
 
 /**
  * Resolves the full configuration.
  *
- * Note: this **writes** into `process.env` (that is how `.env` loading works)
- * and never clears keys it did not set. Call it once per process; a second call
- * with a different `env` will still see values from the first. Tests should
- * clear their own `NAMI_*` keys between fixtures.
+ * Note: this **writes** into `process.env` (that is how `.env` loading works).
+ * The first call snapshots the pre-existing environment; later calls pass
+ * `reload: true` to discard what the previous `.env` supplied and read the file
+ * again, which is what `POST /admin/api/restart` and the `.env` watcher do.
  */
 export function loadConfig(options: LoadConfigOptions = {}): Config {
   const cwd = options.cwd ?? process.cwd();
-  if (!options.env) loadDotEnv(cwd);
+
+  /*
+   * Snapshot before touching anything, including the `env` option: the snapshot
+   * means "the environment before Nami influenced it", so it must not be taken
+   * after a previous call has already written `NAMI_*` values in. Otherwise a
+   * reload would treat those as pre-existing and refuse to overwrite them.
+   */
+  rememberPristineEnv();
+
+  if (!options.env) {
+    if (options.reload === true) forgetInjectedEnv();
+    loadDotEnv(cwd);
+  }
   if (options.env) {
     for (const [key, value] of Object.entries(options.env)) {
       if (value !== undefined) process.env[key] = value;
@@ -403,10 +513,25 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
     adminToken: process.env.NAMI_ADMIN_TOKEN?.trim() || null,
     generatedKey,
 
+    auth: {
+      bootstrapUser: envStr('NAMI_ADMIN_USER', 'admin'),
+      // Not trimmed: a leading/trailing space can be a deliberate part of a
+      // passphrase, and `.env` parsing already strips the quoting.
+      bootstrapPassword: envStr('NAMI_ADMIN_PASSWORD', ''),
+      sessionTtlMs: envInt('NAMI_SESSION_TTL_HOURS', 168, 1) * 3_600_000,
+      cookieName: envStr('NAMI_SESSION_COOKIE', 'nami_session'),
+      cookieSecure: envEnum('NAMI_COOKIE_SECURE', ['auto', 'always', 'never'] as const, 'auto'),
+      trustProxy: envBool('NAMI_TRUST_PROXY', false),
+      maxAttempts: envInt('NAMI_LOGIN_MAX_ATTEMPTS', 5, 1),
+      lockoutMs: envInt('NAMI_LOGIN_LOCKOUT_SECONDS', 300, 0) * 1000,
+      attemptWindowMs: envInt('NAMI_LOGIN_WINDOW_SECONDS', 900, 0) * 1000,
+    },
+
     corsOrigin: envStr('NAMI_CORS_ORIGIN', '*'),
     maxBodyBytes: envInt('NAMI_MAX_BODY_BYTES', 1_048_576, 1024),
     requestTimeoutMs: envInt('NAMI_REQUEST_TIMEOUT_MS', 120_000, 1000),
     shutdownGraceMs: envInt('NAMI_SHUTDOWN_GRACE_MS', 8000, 0),
+    hotReload: envBool('NAMI_HOT_RELOAD', true),
 
     dbPath: envStr('NAMI_DB_PATH', resolve(cwd, 'data', 'nami.sqlite')),
     // Overridable so tests (and multi-instance setups) never touch the real
@@ -484,6 +609,7 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
 
     ws: {
       path: envStr('NAMI_WS_PATH', '/ws'),
+      token: process.env.NAMI_WS_TOKEN?.trim() || null,
       maxPayloadBytes: envInt('NAMI_WS_MAX_PAYLOAD_BYTES', 1_048_576, 1024),
       heartbeatMs: envInt('NAMI_WS_HEARTBEAT_MS', 30_000, 1000),
       maxConnectionsPerKey: envInt('NAMI_WS_MAX_CONNECTIONS_PER_KEY', 8, 1),

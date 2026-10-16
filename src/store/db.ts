@@ -65,6 +65,62 @@ CREATE TABLE IF NOT EXISTS kv (
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (session_id, key)
 );
+
+/*
+ * Console accounts. Separate from the conversation-session table, which despite
+ * the name holds *conversation* sessions — the naming collision is unfortunate
+ * but the agent side owns that word in this codebase.
+ *
+ * password_hash carries its own parameters (see src/auth/passwords.ts), so the
+ * cost can be raised later without a migration. disabled exists so an account
+ * can be switched off without deleting the row and losing the audit trail.
+ */
+CREATE TABLE IF NOT EXISTS users (
+  id            TEXT PRIMARY KEY,
+  username      TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  is_admin      INTEGER NOT NULL DEFAULT 1,
+  disabled      INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL,
+  last_login_at INTEGER
+);
+
+/*
+ * Login sessions for the console. The primary key is the SHA-256 of the token,
+ * never the token itself, so the table alone cannot be replayed as credentials.
+ *
+ * ON DELETE CASCADE means removing a user immediately invalidates every session
+ * they hold, which is what "delete this account" has to mean.
+ */
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  token_hash   TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at   INTEGER NOT NULL,
+  expires_at   INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  user_agent   TEXT,
+  ip           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry ON auth_sessions(expires_at);
+
+/*
+ * Failed logins, kept in the database rather than in memory so a restart cannot
+ * be used to reset the lockout counter. Rows are keyed by username and by client
+ * address separately: keying by username alone lets an attacker lock a known
+ * account out at will, and keying by address alone lets a botnet spread its
+ * attempts.
+ */
+CREATE TABLE IF NOT EXISTS login_attempts (
+  scope        TEXT NOT NULL,
+  subject      TEXT NOT NULL,
+  failures     INTEGER NOT NULL DEFAULT 0,
+  first_at     INTEGER NOT NULL,
+  last_at      INTEGER NOT NULL,
+  locked_until INTEGER,
+  PRIMARY KEY (scope, subject)
+);
 `;
 
 /**
