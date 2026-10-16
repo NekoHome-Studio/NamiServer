@@ -62,7 +62,15 @@ function redactedConfig(deps: AppDeps): Record<string, unknown> {
       fsAllowRoots: config.tools.fsAllowRoots,
     },
     rateLimit: { ...config.rateLimit },
-    ws: { ...config.ws },
+    ws: {
+      // Spread would carry `token` straight to the browser; report only whether
+      // one is set, the same way every other secret is handled.
+      path: config.ws.path,
+      maxPayloadBytes: config.ws.maxPayloadBytes,
+      heartbeatMs: config.ws.heartbeatMs,
+      maxConnectionsPerKey: config.ws.maxConnectionsPerKey,
+      token: { configured: config.ws.token !== null },
+    },
     onebot: {
       enabled: config.onebot.enabled,
       url: config.onebot.url,

@@ -91,6 +91,17 @@ export interface WsConfig {
   maxPayloadBytes: number;
   heartbeatMs: number;
   maxConnectionsPerKey: number;
+  /**
+   * Dedicated credential for the WebSocket endpoint.
+   *
+   * Unset (the default) keeps the original behaviour: `/ws` shares the API-key
+   * scheme. When set, it becomes the **only** accepted credential there, which is
+   * the point — a browser has to put a WS credential in the query string, and
+   * handing it a general-purpose API key means that key ends up in proxy and
+   * access logs. A WS-only token can be rotated on its own and grants nothing on
+   * `/v1/*` or `/admin/api/*`.
+   */
+  token: string | null;
 }
 
 /** Accepted values for `NAMI_ONEBOT_TRIGGER`. */
@@ -554,6 +565,7 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
 
     ws: {
       path: envStr('NAMI_WS_PATH', '/ws'),
+      token: process.env.NAMI_WS_TOKEN?.trim() || null,
       maxPayloadBytes: envInt('NAMI_WS_MAX_PAYLOAD_BYTES', 1_048_576, 1024),
       heartbeatMs: envInt('NAMI_WS_HEARTBEAT_MS', 30_000, 1000),
       maxConnectionsPerKey: envInt('NAMI_WS_MAX_CONNECTIONS_PER_KEY', 8, 1),

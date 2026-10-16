@@ -530,6 +530,17 @@ export const CONFIG_FIELDS: ConfigFieldSpec[] = [
 
   /* --------------------------- WebSocket --------------------------- */
   {
+    key: 'NAMI_WS_TOKEN',
+    group: 'WebSocket',
+    type: 'string',
+    description:
+      'WebSocket 专用令牌。留空则 /ws 沿用 API Key 鉴权；一旦设置，/ws 只认这个令牌（API Key 不再能连），便于单独轮换——浏览器只能把 WS 凭据放在 URL 查询串里，用通用 API Key 会让它进入代理与访问日志。该令牌对 /v1/* 与 /admin/api/* 无效。',
+    secret: true,
+    read: () => null,
+    isConfigured: (c) => c.ws.token !== null,
+    restartRequired: RESTART,
+  },
+  {
     key: 'NAMI_WS_PATH',
     group: 'WebSocket',
     type: 'string',

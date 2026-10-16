@@ -251,13 +251,57 @@ export function authenticateOptional(
 }
 
 /**
+ * Authenticates a WebSocket handshake.
+ *
+ * Two modes, and the switch is the presence of `NAMI_WS_TOKEN`:
+ *
+ *   * **No dedicated token** — `/ws` shares the API-key scheme, exactly as
+ *     before. Existing integrations keep working.
+ *   * **Dedicated token set** — it becomes the *only* accepted credential here.
+ *     Being additive would defeat the purpose: the reason to have one at all is
+ *     that a browser must put a WS credential in the query string, where it can
+ *     be captured by proxy and access logs. A WS-only token can be rotated on
+ *     its own and is useless against `/v1/*` and `/admin/api/*`.
+ *
+ * The token is accepted through the same carriers as an API key, `?key=` first
+ * among them, because a browser cannot set headers on a WebSocket handshake.
+ */
+export function authenticateWebSocket(
+  config: Config,
+  req: IncomingMessage,
+  url: URL,
+): AuthInfo {
+  const token = config.ws.token;
+  if (token === null) {
+    return authenticate(config, req, url, { allowQuery: true });
+  }
+
+  const credentials = readCredentials(req, url, true);
+  if (credentials.length === 0) {
+    throw new HttpError(
+      401,
+      'Missing WebSocket token. Connect with "?key=<NAMI_WS_TOKEN>", or send it as a Bearer token.',
+      'missing_ws_token',
+    );
+  }
+  const match = credentials.find((credential) => constantTimeEqual(credential.value, token));
+  if (!match) {
+    // Deliberately says nothing about API keys: this endpoint no longer accepts
+    // them, and pretending otherwise would send the operator down the wrong path.
+    throw new HttpError(401, 'Invalid WebSocket token.', 'invalid_ws_token');
+  }
+  // `ws` reads as-is in logs, like `admin`; the token itself is never logged.
+  return { key: 'ws', via: match.via, isAdmin: true };
+}
+
+/**
  * Masks a key for logging: `nami_abcd…wxyz`.
  *
  * Session keys (`user:<name>`) pass through unmasked — an account name is not a
  * secret, and knowing who made a change is the whole point of logging it.
  */
 export function maskKey(key: string): string {
-  if (key === 'admin' || key === 'anonymous') return key;
+  if (key === 'admin' || key === 'anonymous' || key === 'ws') return key;
   if (key.startsWith('user:')) return key;
   if (key.length <= 10) return `${key.slice(0, 2)}…`;
   return `${key.slice(0, 8)}…${key.slice(-4)}`;

@@ -3479,6 +3479,86 @@ async function fetchText(
   return { status: response.status, body, json };
 }
 
+/**
+ * The dedicated WebSocket token.
+ *
+ * The security-relevant half is not "the token connects" but "nothing else
+ * does": once `NAMI_WS_TOKEN` is set, an API key must stop working on `/ws`, and
+ * the token must grant nothing on `/v1/*` or `/admin/api/*`. It must also never
+ * come back out of the config endpoints.
+ */
+async function testWebSocketToken(): Promise<void> {
+  section('WebSocket 专用令牌');
+
+  const plain = await startServer('ws-open', {});
+  equal('未配置时 ws.token 为空', plain.config.ws.token, null);
+
+  const token = 'ws_secret_token_abc123';
+  const guarded = await startServer('ws-token', { NAMI_WS_TOKEN: token });
+  equal('配置后 ws.token 生效', guarded.config.ws.token, token);
+
+  const withToken = await wsConnect(
+    guarded,
+    token,
+    (send) => send({ type: 'ping' }),
+    (message) => message.type === 'pong',
+  );
+  check(
+    'WS 令牌可以建立连接',
+    withToken.messages.some((message) => message.type === 'ready'),
+  );
+
+  let apiKeyRejected = false;
+  try {
+    await wsConnect(guarded, guarded.key, () => {}, () => false);
+  } catch {
+    apiKeyRejected = true;
+  }
+  check('设置令牌后 API Key 不能再连 WS', apiKeyRejected);
+
+  let wrongTokenRejected = false;
+  try {
+    await wsConnect(guarded, 'ws_wrong_token', () => {}, () => false);
+  } catch {
+    wrongTokenRejected = true;
+  }
+  check('错误的 WS 令牌不能连接', wrongTokenRejected);
+
+  equal(
+    'WS 令牌对 /v1/* 无效 → 401',
+    (await http(guarded, 'GET', '/v1/models', { key: token })).status,
+    401,
+  );
+  // With an admin token configured, any other credential is refused with 403
+  // rather than 401 — either way it is refused, which is the point.
+  const adminAttempt = await http(guarded, 'GET', '/admin/api/overview', { key: token });
+  check(
+    'WS 令牌对 /admin/api/* 被拒绝',
+    adminAttempt.status === 401 || adminAttempt.status === 403,
+    String(adminAttempt.status),
+  );
+
+  const admin = { key: null, adminToken: ADMIN_TOKEN };
+  const config = await http(guarded, 'GET', '/admin/api/config', admin);
+  const configRaw = JSON.stringify(config.json);
+  equal('配置接口可读（否则下面的不回显断言会空过）', config.status, 200);
+  check('配置接口不回显 WS 令牌', !configRaw.includes(token), configRaw.slice(0, 120));
+  equal(
+    '配置接口报告令牌已配置',
+    (config.json as { config?: { ws?: { token?: { configured?: boolean } } } })?.config?.ws?.token
+      ?.configured,
+    true,
+  );
+
+  const schema = await http(guarded, 'GET', '/admin/api/config/schema', admin);
+  const field = (
+    schema.json as { fields?: Array<{ key: string; secret: boolean; value: unknown; configured?: boolean }> }
+  ).fields?.find((entry) => entry.key === 'NAMI_WS_TOKEN');
+  equal('schema 里 NAMI_WS_TOKEN 标记为密钥', field?.secret, true);
+  equal('schema 里不回显令牌值', field?.value, null);
+  equal('schema 里 configured=true', field?.configured, true);
+}
+
 /* ------------------------------------------------------------------ *
  * Entry point
  * ------------------------------------------------------------------ */
@@ -3515,6 +3595,7 @@ async function main(): Promise<void> {
     await testRateLimitAndLimits();
     await testConsoleAccounts();
     await testHotReload();
+    await testWebSocketToken();
   } catch (error) {
     failures.push({
       name: 'unexpected exception',

@@ -20,7 +20,7 @@ import type { LLMProvider } from '../llm/types.ts';
 import type { SessionStore } from '../store/store.ts';
 import type { ToolRegistry } from '../tools/registry.ts';
 import { runAgent } from '../core/agent.ts';
-import { authenticate, maskKey } from '../http/auth.ts';
+import { authenticateWebSocket, maskKey } from '../http/auth.ts';
 import { HttpError } from '../http/response.ts';
 import { buildHandshake } from './frames.ts';
 import { WebSocketConnection } from './connection.ts';
@@ -95,7 +95,7 @@ export class WebSocketGateway {
 
     let auth;
     try {
-      auth = authenticate(config, req, url, { allowQuery: true });
+      auth = authenticateWebSocket(config, req, url);
     } catch (error) {
       const httpError = error instanceof HttpError ? error : null;
       metrics.recordAuthRejection();

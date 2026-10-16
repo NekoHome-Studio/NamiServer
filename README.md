@@ -628,10 +628,23 @@ NAMI_LLM_MODEL=deepseek-chat
 
 ### 如何鉴权
 
+默认情况下 `/ws` 与 `/v1/*` 共用同一套凭证：
+
 - **非浏览器客户端**：使用标准请求头 `Authorization: Bearer <API_KEY>`。
 - **浏览器**：WebSocket 构造函数 **无法设置请求头**，因此 `/ws` 额外接受 query 参数 —— `?key=<API_KEY>`（也兼容 `?api_key=`）。
-  注意这会出现在访问日志/浏览器历史里，请只在受信网络中使用，或改用服务端代理。
 - 也接受 `X-Admin-Token` 请求头。
+
+**但如果设置了 `NAMI_WS_TOKEN`，`/ws` 就只认这个令牌**（API Key 与 Admin Token 都不再能连）。这是推荐给浏览器的用法：浏览器只能把 WS 凭据放进 URL 查询串，而查询串会进访问日志、代理日志和浏览器历史；把通用 API Key 放进去等于到处撒长期凭证。专用令牌可以**单独轮换**，并且对 `/v1/*`、`/admin/api/*` **完全无效**——泄露了也只能连 WS，且改一行 `.env` 就能作废（保存后自动热重载生效）。
+
+```bash
+# .env
+NAMI_WS_TOKEN=nami_ws_换成一个随机串
+```
+
+```js
+// 浏览器
+const ws = new WebSocket(`ws://<host>:8788/ws?key=${encodeURIComponent(WS_TOKEN)}`);
+```
 
 握手阶段就会被拒绝：未鉴权返回 `401`，同一 key 并发连接超过 `NAMI_WS_MAX_CONNECTIONS_PER_KEY`（默认 8）返回 `429`，路径不对返回 `404`。
 
@@ -865,13 +878,13 @@ npm run webui:dev         # 开发服务器（:5199，自动代理到本机 8787
 npm run webui:build       # 构建并输出到 src/web/app
 ```
 
-冒烟测试共 **563 项断言**，覆盖全部通道与安全边界。其中：
+冒烟测试共 **576 项断言**，覆盖全部通道与安全边界。其中：
 
 - **Ollama** 部分跑在测试内启动的**假 Ollama 守护进程**上，因此不需要真装 Ollama 也能验证：`/api/tags` 发现、NDJSON 流式解析（并故意把一行 JSON 拆到两次 TCP 写入以测试分片缓冲）、原生 tool calling、`num_ctx` / `keep_alive` 透传、别名与白名单策略、以及 Ollama 不可用时的降级行为。
 - **OneBot** 部分跑在测试内启动的**假 OneBot 实现**上，覆盖：入站过滤的每一条分支（@/前缀/全部/闭麦、私聊视为对机器人说话、自我循环、群与用户白名单、图片无文字）、上报密钥校验、`204` 先于模型返回、回答经真实 `at` 消息段回发、长回答分片、出站工具的白名单拒绝、以及管理端同步模拟与手动发送。
 - **外部集成契约**部分把 AstrBot 插件依赖的调用约定钉死：带冒号的作用域会话 id 能原样落库与取回、URL 编码后的会话删除、`/readyz` 的 `checks` 字段齐全、以及插件据此给建议的错误码。
 
-加上 AstrBot 插件自己的 **448 项**离线自检，这个仓库里共有 **1011 项**可复现的断言。
+加上 AstrBot 插件自己的 **448 项**离线自检，这个仓库里共有 **1024 项**可复现的断言。
 
 关于 `npm install`：**只有 `npm run typecheck`（和 `npm test` 的类型检查部分）需要它**，因为 `typescript` 与 `@types/node` 是 devDependencies。日常 `npm start` / `npm run dev` / `npm run smoke` 都不需要 `node_modules`，也不会产生 `dist/` 目录 —— 整个项目没有构建产物。
 

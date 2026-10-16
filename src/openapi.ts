@@ -1065,7 +1065,7 @@ export function buildOpenApiDocument(deps: AppDeps): Json {
           type: 'http',
           scheme: 'bearer',
           description:
-            'An API key from `NAMI_API_KEYS`. Admin endpoints additionally accept `X-Admin-Token`. The WebSocket endpoint also accepts `?key=` because browsers cannot set headers on a WebSocket handshake.',
+            'An API key from `NAMI_API_KEYS`. Admin endpoints additionally accept `X-Admin-Token`. The WebSocket endpoint also accepts `?key=` because browsers cannot set headers on a WebSocket handshake — and when `NAMI_WS_TOKEN` is set it accepts *only* that token, so the credential in the query string is not a general-purpose key.',
         },
       },
       schemas: {
