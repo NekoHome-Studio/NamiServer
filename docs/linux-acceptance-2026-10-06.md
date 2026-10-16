@@ -288,3 +288,15 @@ podman/buildah/nerdctl/kaniko → 全部不存在
 **顺带修掉一键脚本的一个真 bug**：`scripts/ollama.ts` 的模型选择优先采用 `.env` 里已配置的名字，于是 `--pull qwen2.5:3b --write` 在全新环境下写出了占位名 `nami-mock-1`（Ollama 里根本不存在），**而且脚本在写之前刚打印过「该模型未安装」的警告**。现在「刚拉取的模型」优先于旧配置名（显式 `--model` 仍最优先），选择逻辑抽成纯函数 `selectModel()` 并加了 6 项断言。
 
 数字：smoke **597** 项断言、可移植性 **667** 项、加插件自检共 **1045** 项。
+
+### 9. 凭据收敛（同日稍后）
+
+QQ 既然交给 AstrBot，Nami 的 OneBot 桥接及其凭据都失去用途，按用户决定清理：
+
+- `NAMI_ONEBOT_ENABLED=false`（已生效，`/onebot/event` 返回 503）
+- 删除 `NAMI_ONEBOT_ACCESS_TOKEN` 与 `NAMI_ONEBOT_EVENT_TOKEN`（状态接口现在报告两者 `configured: false`）。保留 `NAMI_ONEBOT_URL`，它在关闭状态下是惰性的。
+- `NAMI_WS_TOKEN` 保持用户指定值不动。
+
+顺带记录一处观察：该 WS 令牌与两个 OneBot 令牌原本是**同一个字符串**——一个凭据同时充当三个角色，就失去了「可单独轮换」的意义。OneBot 那两个已删除，现在该值只剩 WS 一个用途。
+
+**注入类测试必须写临时路径**：本轮为此专门确认过 `testWsTokenAdmin` 写的是 `data/ws-token-<pid>/.env` 而非真实 `.env`（真实文件当时被外部改动过，这个检查排除了"是不是我的测试写的"）。
