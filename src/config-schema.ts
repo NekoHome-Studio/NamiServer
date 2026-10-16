@@ -224,8 +224,9 @@ export const CONFIG_FIELDS: ConfigFieldSpec[] = [
     key: 'NAMI_LLM_PROVIDER',
     group: 'LLM',
     type: 'enum',
-    description: '模型来源。mock 完全离线，ollama 走本机原生 API，openai 适配任意兼容端点。',
-    options: ['mock', 'ollama', 'openai'],
+    description:
+      '模型来源。mock 完全离线，ollama 走本机原生 API，openai 适配任意兼容端点，ofm 中转到 dsh-our-free-model 的本地免费模型网关。',
+    options: ['mock', 'ollama', 'openai', 'ofm'],
     read: (c) => c.llm.provider,
     restartRequired: RESTART,
   },
@@ -233,7 +234,8 @@ export const CONFIG_FIELDS: ConfigFieldSpec[] = [
     key: 'NAMI_LLM_BASE_URL',
     group: 'LLM',
     type: 'string',
-    description: 'OpenAI 兼容端点基地址。provider=ollama 时忽略（由 NAMI_OLLAMA_URL 推导）。',
+    description:
+      'OpenAI 兼容端点基地址。provider=ollama 时由 NAMI_OLLAMA_URL 推导、provider=ofm 时由 NAMI_OFM_URL 推导，两者都会忽略本项。',
     read: (c) => c.llm.baseUrl,
     restartRequired: RESTART,
   },
@@ -241,7 +243,7 @@ export const CONFIG_FIELDS: ConfigFieldSpec[] = [
     key: 'NAMI_LLM_API_KEY',
     group: 'LLM',
     type: 'string',
-    description: '上游 API Key。mock 与 ollama 不需要。',
+    description: "上游 API Key。mock 与 ollama 不需要；provider=ofm 时填 OFM 设置页里的「本机 Key」（不是局域网 Key）。",
     secret: true,
     read: () => null,
     isConfigured: (c) => c.llm.apiKey !== '',
@@ -311,6 +313,17 @@ export const CONFIG_FIELDS: ConfigFieldSpec[] = [
     type: 'int',
     description: '启动探测超时（毫秒）。',
     read: (c) => c.ollama.probeTimeoutMs,
+    restartRequired: RESTART,
+  },
+
+  /* ------------------------------ OFM ------------------------------ */
+  {
+    key: 'NAMI_OFM_URL',
+    group: 'OFM',
+    type: 'string',
+    description:
+      'dsh-our-free-model 网关地址，不要带 /v1。设置它即等于选中 ofm 中转（除非显式指定了 NAMI_LLM_PROVIDER）。OFM 端口被占用时会顺延，以它设置页里显示的为准。',
+    read: (c) => c.ofm.url,
     restartRequired: RESTART,
   },
 

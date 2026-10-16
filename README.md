@@ -3,10 +3,11 @@
 **自托管的 AI Agent 服务器载体（agent server carrier）** —— 可插拔 LLM 适配器、带沙箱的工具调用循环，以及 OpenAI 兼容 REST + 原生 SSE + WebSocket 三通道网关，运行时零依赖。
 
 - 🦙 **一键接入 Ollama**：`npm run ollama -- --write` 自动探测、列模型、拉取、写 `.env`；走原生 `/api/chat`，可控制 `num_ctx` / `keep_alive`
+- 🐾 **一站式中转免费模型**：`npm run ofm -- --write` 接上 [dsh-our-free-model](https://github.com/)（OFM）的本地网关，把它的免费模型目录托管成你自己的 OpenAI 兼容端点——客户端只管换成 `model` 名字，路由、别名、会话与工具循环都在 Nami 这一层
 - 🌐 **像 OpenAI 一样托管**：按请求 `model` 路由、别名映射（`gpt-4o-mini=qwen2.5:7b`）、模型白名单、上游不可达时优雅降级
 - 💬 **接入 QQ**：内置 OneBot v11 连接器，对接 SnowLuma / NapCat / LLOneBot；入站按 @ 或前缀触发、每个群独立会话，出站工具带发送白名单
-- 🤖 **接入 AstrBot**：附完整插件 `integrations/astrbot_plugin_nami/`（指令直连 + Dashboard 控制台 + 448 项离线自检）；也可以不装插件，直接把 Nami 配成 AstrBot 的 OpenAI 兼容提供商
-- 🧩 **可插拔 LLM 适配器**：`ollama` 原生适配器、`openai` 兼容任意 `/chat/completions` 端点、`mock` 完全离线可用
+- 🤖 **接入 AstrBot**：附完整插件 `integrations/astrbot_plugin_nami/`（指令直连 + Dashboard 控制台 + 448 项离线自检）；也可以不装插件，直接把 Nami 配成 AstrBot 的 OpenAI 兼容提供商；免费模型另有 `astrbot_plugin_our_free_model`（默认就走 Nami 中转）
+- 🧩 **可插拔 LLM 适配器**：`ollama` 原生适配器、`openai` 兼容任意 `/chat/completions` 端点、`ofm` 中转免费模型网关、`mock` 完全离线可用
 - 🛠️ **带沙箱的工具调用循环**：JSON Schema 参数校验、超时、结果截断、危险工具默认关闭
 - 🔌 **三通道接入**：OpenAI 兼容 REST、原生 SSE 事件流、WebSocket 双向控制
 - 💾 **SQLite 会话持久化**：会话、消息、运行记录、工具调用、会话级 KV
@@ -201,6 +202,95 @@ Nami 用的是 Ollama 自己的 `/api/chat`（NDJSON 流式），而不是 `/v1/
 - 原生 tool calling 少一层翻译，更忠实。
 
 Nami 对外**依然**暴露 OpenAI 兼容接口——只是上游客户端这一侧用原生协议。
+
+---
+
+## 接入免费模型：以 Nami 为中转
+
+[`dsh-our-free-model`](https://github.com/)（下称 **OFM**）会在本机开一个 OpenAI 兼容网关
+（`设置 → Our Free Model → 本地转发`，默认 `http://127.0.0.1:18899/v1`），提供它当前能路由到的免费模型。
+Nami 可以把这个网关当上游接进来——OFM 说的就是 OpenAI Chat Completions，所以复用现成的
+`openai` 适配器，只是换了个 `ofm` 的名字，好让就绪探针、启动横幅和管理面板指名道姓：
+
+```
+客户端（AstrBot / 任意 OpenAI 客户端）
+        │  base_url = http://<Nami>:8787/v1
+        ▼
+      Nami ── NAMI_OFM_URL ──► OFM 本地网关 ──► 免费车道
+   （路由 / 别名 / 白名单 / 会话 / 工具循环）
+```
+
+```bash
+cd <Nami 目录>
+npm run ofm -- --write     # 探测 OFM 网关、列出免费模型、写 .env
+npm start                  # 默认 http://127.0.0.1:8787
+```
+
+就这两步。向导直接跟 OFM 的 HTTP API 对话：
+
+1. `GET {NAMI_OFM_URL}/v1/models`，确认网关在跑、鉴权通过；
+2. 列出它当前提供的模型（免费车道会随上游变化，所以这是**实时**清单）；
+3. `--write` 把结果写进 `.env`——保留注释、保留无关配置、就地改写已有键，可重复执行。
+
+| 选项 | 说明 |
+| --- | --- |
+| `--url <url>` | OFM 网关地址，**不带** `/v1`，默认 `http://127.0.0.1:18899`（端口被占用时 OFM 会顺延，以它设置页显示的为准） |
+| `--key <key>` | OFM 的「**本机** Key」（局域网访问用的是另一个 Key）；默认沿用 `NAMI_LLM_API_KEY` |
+| `--model <id>` | 指定默认模型。不指定则不钉死：启动时自动采用清单里的第一个——免费车道会变，跟随比钉死更稳 |
+| `--expose <a,b>` | 顺便写入 `NAMI_MODELS_EXPOSE` 白名单，只对外开放这几个名字 |
+| `--write` | 写入 `.env` |
+| `--json` | 以 JSON 输出，便于脚本消费 |
+
+写入的键是 `NAMI_LLM_PROVIDER=ofm`、`NAMI_OFM_URL`、`NAMI_LLM_MODEL`（仅在指定时）、
+`NAMI_LLM_API_KEY`（仅在给了 Key 时；**绝不**把已有 Key 覆盖成空值）、以及可选的白名单。
+
+连不上时向导会区分三种情况并给出各自的下一步：**进程没起/本地转发没开**（连接被拒）、
+**地址或路径不对**（404）、**Key 不对**（401），而不是笼统地报一个连接错误。
+
+### 接好之后得到什么
+
+模型目录变成了 Nami 的目录，于是免费模型自动获得 Nami 的全部托管能力：
+
+```bash
+curl -s http://127.0.0.1:8787/v1/models -H "Authorization: Bearer $KEY"   # 免费模型清单
+curl -s http://127.0.0.1:8787/v1/chat/completions -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"<清单里的任意一个>","messages":[{"role":"user","content":"你好"}]}'
+```
+
+- **按名字路由**：客户端传 `model`，Nami 转发到 OFM；不在清单里的名字在 Nami 这层就以 404 失败，不打到上游。
+- **别名**：`NAMI_MODEL_ALIASES=gpt-4o-mini=<免费模型>`，让硬编码 `gpt-4o-mini` 的工具直接跑免费车道，响应仍回显客户端请求的名字。
+- **白名单**：`NAMI_MODELS_EXPOSE` 控制对外开放哪些名字。
+- **会话与工具**：走 `/v1/chat/completions`（不传 `tools`）时是 Nami 的服务端智能体模式，带工具循环与会话持久化；`/v1/agent/run`、`/ws` 两个通道同样可用。
+
+### 让 AstrBot 用上（默认就走中转）
+
+AstrBot 侧用 **[`astrbot_plugin_our_free_model`](../neko-free-model/astrbot_plugin_our_free_model/)**（与 Nami 同级目录里的独立插件项目，拷进 `<AstrBot>/data/plugins/` 即可）：
+它默认 `relay_mode=nami`，把 OFM 的每个模型注册成一个指向 **Nami** 的
+`openai_chat_completion` 提供商，因此在 WebUI 的「模型提供商」和聊天页模型选择器里都能选到。
+
+只需在插件配置里填两个值：
+
+| 字段 | 值 |
+| --- | --- |
+| Nami 入口 Base URL | `http://<Nami 主机>:8787/v1` |
+| Nami API Key | `NAMI_API_KEYS` 里的任意一个（首启自动生成的那个会打印在启动日志里） |
+
+两种情况都需要：**Nami 得能连上 OFM**（看 Nami 的 `/readyz`），**插件得能连上 Nami**
+（看 `/ofm status`）。插件会把这三跳逐段报出来，断在哪一跳一目了然。
+`relay_mode=direct` 可让 AstrBot 直连 OFM——两种模式的提供商 ID 相同，切换是就地改写。
+
+> `nami_base_url` 填根地址（少写 `/v1`）也没关系，插件会自动补上。
+
+### 为什么中间要放一个 Nami
+
+直接让 AstrBot 连 OFM 也能用。多一跳换来的是：多处客户端共用一份免费模型目录；
+别名把硬编码 `gpt-4o-mini` 的老工具接到免费车道上；白名单控制谁能用哪些模型；
+每个会话独立的历史落在 SQLite 里；以及工具循环与统一的三通道接入。
+代价是多一个进程要活着——所以 `/readyz` 和 `/ofm status` 都是按「能分清是哪一跳断了」来写的。
+
+Docker 部署时 OFM 跑在宿主机：`NAMI_OFM_URL=http://host.docker.internal:18899`
+（Linux 上可能需要 `--add-host=host.docker.internal:host-gateway`），Key 仍走 `NAMI_LLM_API_KEY`。
 
 ---
 
@@ -420,9 +510,9 @@ src/
 │   └── admin.ts            # /admin/api/* 管理接口（密钥一律不回显）
 ├── llm/
 │   ├── types.ts            # LLMProvider 契约、流式 chunk 类型、ModelInfo、wire 工具转换
-│   ├── index.ts            # createProvider：按 NAMI_LLM_PROVIDER 选择适配器
+│   ├── index.ts            # createProvider：按 NAMI_LLM_PROVIDER 选择适配器（ofm 复用 openai，只是换个 id）
 │   ├── ollama.ts           # 原生 Ollama 适配器（/api/chat NDJSON、发现、拉取）
-│   ├── openai.ts           # 任意 OpenAI 兼容端点适配器
+│   ├── openai.ts           # 任意 OpenAI 兼容端点适配器（也服务于 ofm 中转）
 │   ├── router.ts           # 模型目录 + 按请求路由（别名 / 白名单 / 优雅降级）
 │   ├── mock.ts             # 离线确定性 Mock 模型（逐字流式，可触发真实工具调用）
 │   └── collect.ts          # 把流收集成一轮完整回复 + 工具调用分片累加器
@@ -470,7 +560,7 @@ webui/                      # ★ WebUI 源码（Vue 3 + Vuetify 3 + Vite）
     └── views/              # 十个页面
 ```
 
-顶层还有 `scripts/smoke.ts`（端到端测试）、`scripts/check-portability.ts`（跨平台静态检查）、`scripts/ollama.ts`（一键接入向导），以及 `integrations/astrbot_plugin_nami/`（独立的 AstrBot 插件，不属于 Nami 的运行时）。
+顶层还有 `scripts/smoke.ts`（端到端测试）、`scripts/check-portability.ts`（跨平台静态检查）、`scripts/ollama.ts`（Ollama 一键接入向导）、`scripts/ofm.ts`（免费模型中转向导），以及 `integrations/astrbot_plugin_nami/`（独立的 AstrBot 插件，不属于 Nami 的运行时）。
 
 `webui/` 是**构建期**依赖：它的 `node_modules` 只在你修改界面时才需要，编译产物已提交，因此运行 Nami 仍然零安装。
 
@@ -482,7 +572,7 @@ webui/                      # ★ WebUI 源码（Vue 3 + Vuetify 3 + Vite）
 2. **鉴权与限流** —— `http/auth.ts` 从 `Authorization: Bearer`（或 `X-Admin-Token`）取出凭证，用 `timingSafeEqual` 常量时间比对 `NAMI_API_KEYS`；`ratelimit.ts` 对该 key 扣一个令牌，不足则直接返回 `429`。
 3. **模型解析** —— 请求里的 `model` 先交给 `llm/router.ts`：查别名映射、比对白名单、对照发现到的模型目录，未知或未暴露的名字在这里就以 `404` / `403` 失败，**不会**把无效请求打到上游。
 4. **智能体循环** —— `core/agent.ts` 的 `runAgent()` 建立/复用会话、写入 `runs` 记录（记下解析后的模型）、追加用户消息，组装上下文（system prompt + 最近 `NAMI_MAX_HISTORY_MESSAGES` 条历史），进入最多 `NAMI_MAX_TOOL_ROUNDS` 轮的循环。
-5. **LLM 适配器** —— `llm/ollama.ts` / `llm/openai.ts` / `llm/mock.ts` 实现同一个 `stream()` 原语；文本分片立即以 `delta` 事件转发，工具调用分片由 `llm/collect.ts` 按 `index` 拼装成完整 `ToolCall`（Ollama 不下发 id，由适配器合成）。
+5. **LLM 适配器** —— `llm/ollama.ts` / `llm/openai.ts` / `llm/mock.ts` 实现同一个 `stream()` 原语（`provider=ofm` 时直接用 `openai.ts`，只是上游换成 OFM 网关）；文本分片立即以 `delta` 事件转发，工具调用分片由 `llm/collect.ts` 按 `index` 拼装成完整 `ToolCall`（Ollama 不下发 id，由适配器合成）。
 6. **工具沙箱** —— 若有工具调用，先 `emit tool.call`，再由 `tools/sandbox.ts` 校验参数、以 `NAMI_TOOL_TIMEOUT_MS` 为上限执行、按 `NAMI_MAX_TOOL_RESULT_BYTES` 截断结果，然后发出 `tool.result` 并把结果作为 `tool` 角色消息回灌给模型，进入下一轮。
 7. **持久化** —— 每一步都在 `core/agent.ts` 内落库：assistant 消息（含工具调用）、tool 结果、`tool_invocations` 明细；`finally` 块保证运行记录一定被收尾（即使客户端中途断开）。
 8. **SSE / WS 输出** —— `http/sse.ts` 把 `AgentEvent` 写成 `event:` + `data:` 帧（含心跳注释）；WebSocket 通道则把同一个事件扁平化成 `{ "type": ..., ...data }` 的 JSON。两条通道共享完全相同的语义，因为它们转发的是同一个事件流。
@@ -495,11 +585,11 @@ webui/                      # ★ WebUI 源码（Vue 3 + Vuetify 3 + Vite）
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `NAMI_LLM_PROVIDER` | `mock` | `mock`（离线）或 `openai`（任意 OpenAI 兼容端点） |
-| `NAMI_LLM_BASE_URL` | `https://api.openai.com/v1` | 上游 API 基地址，结尾斜杠会被去掉 |
-| `NAMI_LLM_API_KEY` | *(空)* | 上游 API Key；`mock` 与 Ollama 都不需要真实值 |
-| `NAMI_LLM_MODEL` | `mock` 时为 `nami-mock-1`，否则 `gpt-4o-mini` | 模型 id |
-| `NAMI_LLM_TIMEOUT_MS` | `120000` | 上游请求超时（毫秒），与调用方取消信号合并 |
+| `NAMI_LLM_PROVIDER` | `mock` | `mock`（离线）、`ollama`（原生 API）、`openai`（任意兼容端点）或 `ofm`（中转免费模型网关） |
+| `NAMI_LLM_BASE_URL` | `https://api.openai.com/v1` | 上游 API 基地址，结尾斜杠会被去掉。`provider=ollama` / `ofm` 时忽略（分别由 `NAMI_OLLAMA_URL` / `NAMI_OFM_URL` 推导） |
+| `NAMI_LLM_API_KEY` | *(空)* | 上游 API Key；`mock` 与 Ollama 不需要真实值。`provider=ofm` 时填 OFM 的「本机 Key」 |
+| `NAMI_LLM_MODEL` | `mock` 时为 `nami-mock-1`，否则 `gpt-4o-mini`；`ollama` / `ofm` 时为**空** | 模型 id；留空表示启动时自动发现并采用第一个 |
+| `NAMI_LLM_TIMEOUT_MS` | `120000`（`ollama` / `ofm` 为 `300000`） | 上游请求超时（毫秒），与调用方取消信号合并 |
 | `NAMI_LLM_HEADERS` | *(空)* | 附加请求头，逗号分隔的 `key=value` |
 | `NAMI_MOCK_DELAY_MS` | `8` | 仅对 `mock` 生效：每个分片的延迟（毫秒），`0` 表示最快 |
 
@@ -511,6 +601,7 @@ Ollama 与模型托管相关的变量：
 | `NAMI_OLLAMA_KEEP_ALIVE` | `5m` | 模型驻留时长；`0` 立即卸载，`-1` 永久驻留 |
 | `NAMI_OLLAMA_NUM_CTX` | `0` | 上下文窗口（`num_ctx`）；`0` 表示沿用 Ollama 自己的默认值（通常是 4096） |
 | `NAMI_OLLAMA_PROBE_TIMEOUT_MS` | `4000` | 启动探测超时（毫秒） |
+| `NAMI_OFM_URL` | `http://127.0.0.1:18899` | OFM 网关地址，**不带 `/v1`**。设置它就等于选用了 `ofm` 中转（与 `NAMI_OLLAMA_URL` 同时设置时 `ofm` 优先） |
 | `NAMI_ALLOW_CLIENT_MODEL` | `true` | 是否允许客户端按请求指定模型 |
 | `NAMI_MODELS_EXPOSE` | *(空)* | 对外开放的**客户端可见**模型名白名单；空表示全部 |
 | `NAMI_MODEL_ALIASES` | *(空)* | 别名映射，逗号分隔的 `客户端名=上游真名` |
@@ -555,6 +646,25 @@ NAMI_LLM_MODEL=deepseek-chat
 ### 其他 OpenAI 兼容端点
 
 `vLLM` / `LM Studio` / `Groq` / `Together` 等同理：把 `NAMI_LLM_BASE_URL` 指向它的 `/v1` 即可。此时 `NAMI_LLM_MODEL` 留空也能自动发现——启动时会调用上游 `/models` 并采用第一个。
+
+### OFM 免费模型（以 Nami 为中转）
+
+```bash
+npm run ofm -- --write      # 自动探测 OFM 网关并写好上面这些变量
+```
+
+手动配置等价于：
+
+```bash
+NAMI_LLM_PROVIDER=ofm
+NAMI_OFM_URL=http://127.0.0.1:18899     # 不带 /v1
+NAMI_LLM_API_KEY=<OFM 的「本机 Key」>
+NAMI_LLM_MODEL=                          # 留空 = 启动时自动发现并采用第一个
+```
+
+`NAMI_LLM_PROVIDER` 留空时，只要设置了 `NAMI_OFM_URL` 也会自动选用 `ofm`——
+和 Ollama 同一条规则；两者都设置时 `ofm` 优先。完整链路与 AstrBot 侧接法见
+[接入免费模型：以 Nami 为中转](#接入免费模型以-nami-为中转)。
 
 ---
 

@@ -34,7 +34,7 @@ export interface AgentConfig {
 }
 
 export interface LlmConfig {
-  provider: 'mock' | 'openai' | 'ollama';
+  provider: 'mock' | 'openai' | 'ollama' | 'ofm';
   baseUrl: string;
   apiKey: string;
   /** Empty means "discover at boot and adopt the first available model". */
@@ -56,6 +56,21 @@ export interface OllamaConfig {
   numCtx: number | null;
   /** Timeout for discovery probes, kept short so boot is never blocked. */
   probeTimeoutMs: number;
+}
+
+/**
+ * dsh-our-free-model (OFM) gateway knobs.
+ *
+ * OFM keeps a local OpenAI-compatible endpoint that serves whatever free models
+ * its own routing can currently reach (default `http://127.0.0.1:18899/v1`).
+ * Nami relays to it — a plain OpenAI-compatible upstream, so the relay reuses
+ * the `openai` adapter — which is what lets one Nami instance hand that whole
+ * catalogue to any number of clients, add model aliases/allowlists, keep
+ * per-conversation history and run the tool loop on top.
+ */
+export interface OfmConfig {
+  /** Gateway base WITHOUT the `/v1` suffix. */
+  url: string;
 }
 
 /**
@@ -198,6 +213,7 @@ export interface Config {
   agent: AgentConfig;
   llm: LlmConfig;
   ollama: OllamaConfig;
+  ofm: OfmConfig;
   models: ModelsConfig;
   tools: ToolsConfig;
   rateLimit: RateLimitConfig;
@@ -341,20 +357,36 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
   }
 
   const ollamaUrl = envStr('NAMI_OLLAMA_URL', 'http://127.0.0.1:11434').replace(/\/+$/, '');
+  const ofmUrl = envStr('NAMI_OFM_URL', 'http://127.0.0.1:18899').replace(/\/+$/, '');
 
   const providerRaw = envStr('NAMI_LLM_PROVIDER', '').toLowerCase();
-  // Pointing NAMI_OLLAMA_URL at a server is enough to select the Ollama adapter,
-  // so the one-click setup script only has to write one variable.
+  // Pointing NAMI_OLLAMA_URL (or NAMI_OFM_URL) at a server is enough to select
+  // the matching adapter, so the one-click setup scripts only have to write one
+  // variable. When both are set the OFM relay wins: it is the more specific
+  // choice, and setting it is always deliberate.
   const provider: LlmConfig['provider'] =
     providerRaw === 'openai'
       ? 'openai'
-      : providerRaw === 'ollama' || (providerRaw === '' && process.env.NAMI_OLLAMA_URL)
+      : providerRaw === 'ollama'
         ? 'ollama'
-        : 'mock';
+        : providerRaw === 'ofm'
+          ? 'ofm'
+          : providerRaw === ''
+            ? process.env.NAMI_OFM_URL
+              ? 'ofm'
+              : process.env.NAMI_OLLAMA_URL
+                ? 'ollama'
+                : 'mock'
+            : 'mock';
 
   const defaultModel =
-    provider === 'mock' ? 'nami-mock-1' : provider === 'ollama' ? '' : 'gpt-4o-mini';
-  const defaultBaseUrl = provider === 'ollama' ? `${ollamaUrl}/v1` : 'https://api.openai.com/v1';
+    provider === 'mock' ? 'nami-mock-1' : provider === 'ollama' || provider === 'ofm' ? '' : 'gpt-4o-mini';
+  const defaultBaseUrl =
+    provider === 'ollama'
+      ? `${ollamaUrl}/v1`
+      : provider === 'ofm'
+        ? `${ofmUrl}/v1`
+        : 'https://api.openai.com/v1';
 
   const numCtxRaw = envInt('NAMI_OLLAMA_NUM_CTX', 0, 0);
 
@@ -400,9 +432,17 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
     llm: {
       provider,
       baseUrl: envStr('NAMI_LLM_BASE_URL', defaultBaseUrl).replace(/\/+$/, ''),
+      // For `ofm` this is OFM's local-machine key, which the gateway checks on
+      // both /v1/models and /v1/chat/completions.
       apiKey: envStr('NAMI_LLM_API_KEY', provider === 'ollama' ? 'ollama' : ''),
       model: envStr('NAMI_LLM_MODEL', defaultModel),
-      timeoutMs: envInt('NAMI_LLM_TIMEOUT_MS', provider === 'ollama' ? 300_000 : 120_000, 1000),
+      // Free lanes queue behind strangers, so the OFM relay inherits Ollama's
+      // generous default rather than the hosted-API one.
+      timeoutMs: envInt(
+        'NAMI_LLM_TIMEOUT_MS',
+        provider === 'ollama' || provider === 'ofm' ? 300_000 : 120_000,
+        1000,
+      ),
       mockDelayMs: envInt('NAMI_MOCK_DELAY_MS', 8, 0),
       extraHeaders,
     },
@@ -412,6 +452,10 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
       keepAlive: envStr('NAMI_OLLAMA_KEEP_ALIVE', '5m'),
       numCtx: numCtxRaw > 0 ? numCtxRaw : null,
       probeTimeoutMs: envInt('NAMI_OLLAMA_PROBE_TIMEOUT_MS', 4000, 200),
+    },
+
+    ofm: {
+      url: ofmUrl,
     },
 
     models: {

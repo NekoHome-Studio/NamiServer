@@ -79,6 +79,18 @@ export class ModelRouter {
     return Date.now() - this.fetchedAt > this.config.models.cacheTtlMs;
   }
 
+  /**
+   * How to get a usable model, phrased for the adapter actually in use.
+   *
+   * The relay's failure mode is "OFM is not running / 本地转发 is off", so telling
+   * that operator to `npm run ollama` would send them down the wrong path.
+   */
+  private get setupHint(): string {
+    return this.provider.id === 'ofm'
+      ? "start OFM's local relay (设置 → Our Free Model → 本地转发), then run `npm run ofm -- --write`"
+      : 'run `npm run ollama` to install and select one';
+  }
+
   /** Refreshes the catalogue. Never throws; concurrent calls share one probe. */
   async refresh(force = false): Promise<ModelInfo[]> {
     if (!force && !this.stale && this.cache.length > 0) return this.cache;
@@ -215,7 +227,7 @@ export class ModelRouter {
           code: 'model_not_found',
           message:
             'No model is configured and none could be discovered. ' +
-            'Set NAMI_LLM_MODEL, or run `npm run ollama` to install and select one.',
+            `Set NAMI_LLM_MODEL, or ${this.setupHint}.`,
         };
       }
       return asked === ''

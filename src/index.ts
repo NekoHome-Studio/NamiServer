@@ -123,6 +123,26 @@ export async function bootstrap(config: Config): Promise<BootstrappedServer> {
     }
   }
 
+  if (config.llm.provider === 'ofm') {
+    if (!models.discoveryOk) {
+      log.error('the Our Free Model gateway is not reachable — chat requests will fail', {
+        url: config.ofm.url,
+        error: models.lastError ?? undefined,
+        hint: 'enable 设置 → Our Free Model → 本地转发 in OFM, then run `npm run ofm -- --write`',
+      });
+    } else {
+      log.info('relaying free models from the Our Free Model gateway', {
+        url: config.ofm.url,
+        modelsAvailable: models.discovered.length,
+      });
+      if (models.discovered.length === 0) {
+        log.warn('the Our Free Model gateway reported no models', {
+          hint: 'every upstream lane it can route may be unavailable right now',
+        });
+      }
+    }
+  }
+
   if (config.onebot.enabled) {
     try {
       const [login, status] = await Promise.all([
@@ -280,14 +300,20 @@ function printBanner(config: Config, deps: AppDeps): void {
   const defaultModel = models.defaultModel;
   const exposed = models.exposedNames();
 
+  // Name the actual upstream, not the generic base URL: for ollama/ofm the
+  // interesting address is the daemon/gateway, and `llm.baseUrl` is derived.
+  const upstream =
+    config.llm.provider === 'ollama'
+      ? config.ollama.url
+      : config.llm.provider === 'ofm'
+        ? config.ofm.url
+        : config.llm.baseUrl;
+
   const rows = [
     line('listening', `${cyan}${base}${reset}`),
     line('admin panel', `${cyan}${base}/admin${reset}`),
     line('api docs', `${cyan}${base}/docs${reset}`),
-    line(
-      'provider',
-      `${provider.id} ${dim}(${config.llm.provider === 'ollama' ? config.ollama.url : config.llm.baseUrl})${reset}`,
-    ),
+    line('provider', `${provider.id} ${dim}(${upstream})${reset}`),
     line(
       'model',
       defaultModel === ''
@@ -343,6 +369,20 @@ function printBanner(config: Config, deps: AppDeps): void {
         '',
         `  ${dim}OpenAI-compatible endpoint — point any client at ${reset}${cyan}${base}/v1${reset}${dim}:${reset}`,
         `     ${dim}base_url=${reset}${base}/v1  ${dim}api_key=${reset}${config.apiKeys[0] ? '(your NAMI_API_KEYS value)' : 'any'}`,
+      );
+    }
+  } else if (config.llm.provider === 'ofm') {
+    if (defaultModel === '') {
+      lines.push(
+        '',
+        `  ${red}OFM 网关没有可用模型。${reset}确认 OFM 的「本地转发」已开启，然后：`,
+        `     ${bold}npm run ofm${reset}`,
+      );
+    } else {
+      lines.push(
+        '',
+        `  ${dim}免费模型已中转到 ${reset}${cyan}${base}/v1${reset}${dim}（上游 OFM ${upstream}）:${reset}`,
+        `     ${dim}base_url=${reset}${base}/v1  ${dim}model=${reset}${defaultModel}`,
       );
     }
   } else if (provider.id === 'mock') {

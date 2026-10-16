@@ -24,12 +24,14 @@ import { validateArgs, formatIssues } from '../src/tools/validate.ts';
 import { TokenBucket } from '../src/ratelimit.ts';
 import { getPanelHtml, getDocsHtml } from '../src/web/panel.ts';
 import { OllamaProvider, toOllamaMessages } from '../src/llm/ollama.ts';
+import { createProvider } from '../src/llm/index.ts';
 import { MockProvider } from '../src/llm/mock.ts';
 import { ModelRouter } from '../src/llm/router.ts';
 import type { StreamChunk } from '../src/llm/types.ts';
 import { listDocumentedRoutes } from '../src/openapi.ts';
 import { nullLogger } from '../src/logger.ts';
 import { parseArgs as parseOllamaArgs, upsertEnv } from './ollama.ts';
+import { parseArgs as parseOfmArgs, parseExpose, pickPinnedModel, probeGateway } from './ofm.ts';
 import {
   chunkMessage,
   decideEvent,
@@ -501,6 +503,199 @@ async function startFakeOllama(
     url: `http://127.0.0.1:${port}`,
     requests,
     pulled,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections?.();
+      }),
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Fake Our Free Model (OFM) gateway
+ *
+ * `dsh-our-free-model` (设置 → Our Free Model → 本地转发) serves the free
+ * models it can currently route as an OpenAI-compatible endpoint. The fake
+ * reproduces the parts the relay depends on — the 本机 Key on every route,
+ * `/v1/models`, SSE chat completions, native tool calls, and a gateway that
+ * rejects `stream_options` — so the whole chain (Nami → OFM) is verifiable
+ * without OFM installed.
+ * ------------------------------------------------------------------ */
+
+interface FakeOfm {
+  /** Gateway base WITHOUT the `/v1` suffix, exactly like NAMI_OFM_URL. */
+  url: string;
+  /** Every /v1/chat/completions request body, in order. */
+  requests: Array<Record<string, unknown>>;
+  /** Authorization header seen on each /v1/* request, in order. */
+  authHeaders: string[];
+  close(): Promise<void>;
+}
+
+async function startFakeOfm(
+  models: string[],
+  options: { apiKey?: string; rejectStreamOptions?: boolean } = {},
+): Promise<FakeOfm> {
+  const requests: Array<Record<string, unknown>> = [];
+  const authHeaders: string[] = [];
+  const expectedKey = options.apiKey ?? '';
+
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const send = (status: number, payload: unknown): void => {
+      const body = JSON.stringify(payload);
+      res.writeHead(status, {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+      });
+      res.end(body);
+    };
+    const readBody = (done: (body: Record<string, unknown>) => void): void => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        let parsed: Record<string, unknown> = {};
+        try {
+          parsed = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<string, unknown>;
+        } catch {
+          parsed = {};
+        }
+        done(parsed);
+      });
+    };
+
+    const auth = req.headers.authorization ?? '';
+    if (url.pathname.startsWith('/v1/')) authHeaders.push(auth);
+    const authorized = expectedKey === '' || auth === `Bearer ${expectedKey}`;
+
+    if (url.pathname === '/v1/models') {
+      if (!authorized) {
+        send(401, { error: { message: 'invalid local key' } });
+        return;
+      }
+      send(200, {
+        object: 'list',
+        data: models.map((id) => ({ id, object: 'model', owned_by: 'our-free-model' })),
+      });
+      return;
+    }
+
+    if (url.pathname === '/v1/chat/completions' && req.method === 'POST') {
+      readBody((body) => {
+        requests.push(body);
+        if (!authorized) {
+          send(401, { error: { message: 'invalid local key' } });
+          return;
+        }
+        // Some OpenAI-compatible servers reject stream_options outright.
+        if (options.rejectStreamOptions && body.stream_options !== undefined) {
+          send(400, { error: { message: 'unknown field: stream_options' } });
+          return;
+        }
+        const model = String(body.model ?? '');
+        // OFM drops a model from /v1/models the moment its lane stops routing;
+        // requesting it anyway is a 404, never a silent substitution.
+        if (!models.includes(model)) {
+          send(404, { error: { message: `no free lane is routing "${model}"` } });
+          return;
+        }
+
+        const messages = (body.messages ?? []) as Array<{ role: string; content?: string }>;
+        const tools = (body.tools ?? []) as Array<{ function?: { name?: string } }>;
+        const last = messages[messages.length - 1];
+        const lastUser = [...messages].reverse().find((message) => message.role === 'user');
+        const wantsTool =
+          tools.length > 0 &&
+          last?.role !== 'tool' &&
+          /几点|时间|time/i.test(lastUser?.content ?? '');
+
+        const answer = wantsTool
+          ? ''
+          : last?.role === 'tool'
+            ? '工具已执行完毕。'
+            : `这是 ${model} 的回答`;
+        const usage = { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 };
+
+        if (body.stream !== true) {
+          send(200, {
+            id: 'chatcmpl-ofm',
+            object: 'chat.completion',
+            created: 1_710_000_000,
+            model,
+            choices: [
+              {
+                index: 0,
+                message: { role: 'assistant', content: answer },
+                finish_reason: 'stop',
+              },
+            ],
+            usage,
+          });
+          return;
+        }
+
+        const frames: string[] = [];
+        const delta = (payload: Record<string, unknown>, finish: string | null = null): void => {
+          frames.push(
+            `data: ${JSON.stringify({
+              id: 'chatcmpl-ofm',
+              object: 'chat.completion.chunk',
+              created: 1_710_000_000,
+              model,
+              choices: [{ index: 0, delta: payload, finish_reason: finish }],
+            })}\n\n`,
+          );
+        };
+
+        delta({ role: 'assistant', content: '' });
+        if (wantsTool) {
+          delta({
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_ofm_1',
+                type: 'function',
+                function: { name: 'now', arguments: '{}' },
+              },
+            ],
+          });
+        } else {
+          delta({ content: answer });
+        }
+        delta({}, 'stop');
+        if ((body.stream_options as { include_usage?: boolean } | undefined)?.include_usage === true) {
+          frames.push(`data: ${JSON.stringify({ choices: [], usage })}\n\n`);
+        }
+        frames.push('data: [DONE]\n\n');
+
+        res.writeHead(200, {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache',
+        });
+        // Deliberately split a frame across two writes: the adapter must buffer
+        // partial SSE lines rather than dropping them.
+        const payload = frames.join('');
+        const cut = Math.floor(payload.length / 2);
+        res.write(payload.slice(0, cut));
+        setTimeout(() => {
+          res.write(payload.slice(cut));
+          res.end();
+        }, 5);
+      });
+      return;
+    }
+
+    send(404, { error: { message: `no route for ${url.pathname}` } });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const address = server.address();
+  const port = address !== null && typeof address === 'object' ? address.port : 0;
+
+  return {
+    url: `http://127.0.0.1:${port}`,
+    requests,
+    authHeaders,
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -1670,6 +1865,377 @@ async function testOllamaUnavailable(): Promise<void> {
   check(
     '错误信息给出下一步操作',
     String((chat.json as { error?: { message?: string } })?.error?.message ?? '').includes('ollama'),
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Our Free Model (OFM) relay
+ * ------------------------------------------------------------------ */
+
+async function testOfmScript(): Promise<void> {
+  section('OFM 一键接入脚本的纯逻辑');
+
+  const args = parseOfmArgs([
+    '--url',
+    'http://x:18899',
+    '--key',
+    'local-key',
+    '--model',
+    'glm-5',
+    '--expose',
+    'a,b',
+    '--write',
+  ]);
+  equal('解析 --url', args.url, 'http://x:18899');
+  equal('解析 --key', args.key, 'local-key');
+  equal('解析 --model', args.model, 'glm-5');
+  equal('解析 --expose', args.expose, 'a,b');
+  equal('解析 --write', args.write, true);
+  equal('未指定 --expose 时为 null', parseOfmArgs([]).expose, null);
+  equal('未指定 --key 时为 null', parseOfmArgs(['--write']).key, null);
+
+  equal('parseExpose 去掉空项与两侧空格', parseExpose('a, b ,,').join('|'), 'a|b');
+  equal('parseExpose 对 null 返回空数组', parseExpose(null).length, 0);
+
+  // Regression: a fresh `.env` loads the *mock* default model. Adopting it as the
+  // OFM default would write `NAMI_LLM_MODEL=nami-mock-1` and warn about a model
+  // the gateway has never heard of.
+  equal('全新 .env 时不把 mock 默认模型当成 OFM 默认', pickPinnedModel('mock', 'nami-mock-1', null), '');
+  equal('已是 ofm 配置时沿用已有默认模型', pickPinnedModel('ofm', 'glm-5', null), 'glm-5');
+  equal('--model 覆盖已有默认模型', pickPinnedModel('ofm', 'glm-5', 'kimi-k3'), 'kimi-k3');
+  equal('已有 openai 配置的模型也不当成 OFM 默认', pickPinnedModel('openai', 'gpt-4o-mini', null), '');
+  equal('--model 在全新 .env 上生效', pickPinnedModel('mock', 'nami-mock-1', 'glm-5'), 'glm-5');
+
+  const created = upsertEnv('', {
+    NAMI_LLM_PROVIDER: 'ofm',
+    NAMI_OFM_URL: 'http://127.0.0.1:18899',
+  });
+  check(
+    '写入 ofm 的两个键',
+    created.content.includes('NAMI_LLM_PROVIDER=ofm') &&
+      created.content.includes('NAMI_OFM_URL=http://127.0.0.1:18899'),
+  );
+
+  /* ---- probe error classification, against a real socket ---- */
+
+  const gateway = await startFakeOfm(['glm-5', 'kimi-k3'], { apiKey: 'ofm_local_key' });
+  try {
+    const ok = await probeGateway(gateway.url, 'ofm_local_key');
+    check('probeGateway 读到网关清单', ok.ok && ok.models.join(',') === 'glm-5,kimi-k3', JSON.stringify(ok));
+
+    const wrongKey = await probeGateway(gateway.url, 'lan-key');
+    equal('Key 不对时归类为 401', wrongKey.status, 401);
+    check('鉴权失败时不吞掉成「没有模型」', !wrongKey.ok && wrongKey.models.length === 0);
+
+    const refused = await probeGateway('http://127.0.0.1:1', 'ofm_local_key');
+    check(
+      '连不上时归类为连接失败（没有状态码）',
+      !refused.ok && refused.status === undefined && (refused.error ?? '').length > 0,
+      JSON.stringify(refused),
+    );
+  } finally {
+    await gateway.close();
+  }
+}
+
+async function testOfmProvider(): Promise<void> {
+  section('OFM 中转适配器（对假网关）');
+
+  const gateway = await startFakeOfm(['deepseek-v4.1-flash', 'glm-5'], { apiKey: 'ofm_local_key' });
+
+  try {
+    const config = testConfig({
+      NAMI_DB_PATH: ':memory:',
+      NAMI_LLM_PROVIDER: 'ofm',
+      NAMI_OFM_URL: gateway.url,
+      NAMI_LLM_API_KEY: 'ofm_local_key',
+      NAMI_LLM_MODEL: '',
+    });
+
+    const provider = createProvider(config);
+    equal('provider id 为 ofm，而不是笼统的 openai', provider.id, 'ofm');
+    equal('基地址由 NAMI_OFM_URL 推导', config.llm.baseUrl, `${gateway.url}/v1`);
+    equal('默认模型留空即自动发现', config.llm.model, '');
+    equal('上游超时沿用宽松默认（免费车道会排队）', config.llm.timeoutMs, 300_000);
+
+    /* ---- selection rules ---- */
+    const ofmUrlOnly = testConfig({
+      NAMI_DB_PATH: ':memory:',
+      NAMI_LLM_PROVIDER: '',
+      NAMI_OFM_URL: gateway.url,
+    });
+    equal('只设置 NAMI_OFM_URL 就选中 ofm', ofmUrlOnly.llm.provider, 'ofm');
+    const both = testConfig({
+      NAMI_DB_PATH: ':memory:',
+      NAMI_LLM_PROVIDER: '',
+      NAMI_OFM_URL: gateway.url,
+      NAMI_OLLAMA_URL: 'http://127.0.0.1:11434',
+    });
+    equal('同时设置 OFM 与 Ollama 时 OFM 优先', both.llm.provider, 'ofm');
+    const ollamaOnly = testConfig({
+      NAMI_DB_PATH: ':memory:',
+      NAMI_LLM_PROVIDER: '',
+      NAMI_OLLAMA_URL: 'http://127.0.0.1:11434',
+    });
+    equal('只设置 NAMI_OLLAMA_URL 仍选中 ollama（原有行为不变）', ollamaOnly.llm.provider, 'ollama');
+    const explicitOpenAi = testConfig({
+      NAMI_DB_PATH: ':memory:',
+      NAMI_LLM_PROVIDER: 'openai',
+      NAMI_OFM_URL: gateway.url,
+    });
+    equal('显式 openai 不被 NAMI_OFM_URL 覆盖', explicitOpenAi.llm.provider, 'openai');
+    const withSlash = testConfig({ NAMI_DB_PATH: ':memory:', NAMI_OFM_URL: `${gateway.url}/` });
+    equal('NAMI_OFM_URL 结尾斜杠被去掉', withSlash.ofm.url, gateway.url);
+
+    /* ---- discovery ---- */
+    const models = await provider.listModelInfo();
+    equal('listModelInfo 读到网关清单', models.length, 2);
+    equal('模型 id 原样保留', models[0]?.id, 'deepseek-v4.1-flash');
+    equal('保留网关自己声明的归属', models[0]?.ownedBy, 'our-free-model');
+
+    /* ---- streaming text over SSE ---- */
+    gateway.requests.length = 0;
+    const chunks = await drain(
+      provider.stream({
+        messages: [{ role: 'user', content: '你好' }],
+        model: 'deepseek-v4.1-flash',
+      }),
+    );
+    check(
+      '跨 TCP 分片的 SSE 被正确重组',
+      textOfChunks(chunks).includes('这是 deepseek-v4.1-flash 的回答'),
+      textOfChunks(chunks),
+    );
+    equal('finish reason 透传', finishOf(chunks)?.reason, 'stop');
+    equal('usage 取自 include_usage 帧', finishOf(chunks)?.usage.total_tokens, 18);
+    equal('请求带上 OFM 本机 Key', gateway.authHeaders.at(-1), 'Bearer ofm_local_key');
+    equal(
+      '请求声明 include_usage',
+      (gateway.requests[0]?.stream_options as { include_usage?: boolean } | undefined)?.include_usage,
+      true,
+    );
+
+    /* ---- per-request model override ---- */
+    gateway.requests.length = 0;
+    await drain(
+      provider.stream({ messages: [{ role: 'user', content: 'hi' }], model: 'glm-5' }),
+    );
+    equal('按请求覆盖模型', gateway.requests[0]?.model, 'glm-5');
+    equal('默认模型未被改动', provider.model, '');
+
+    /* ---- native tool calls forwarded to the gateway ---- */
+    gateway.requests.length = 0;
+    const toolChunks = await drain(
+      provider.stream({
+        messages: [{ role: 'user', content: '现在几点' }],
+        model: 'deepseek-v4.1-flash',
+        tools: [
+          {
+            name: 'now',
+            description: 'current time',
+            parameters: { type: 'object', properties: {} },
+            danger: 'safe',
+            enabled: true,
+          },
+        ],
+      }),
+    );
+    const call = toolCallOf(toolChunks);
+    equal('解析出网关返回的 tool_call', call?.name, 'now');
+    equal('tool_call id 透传', call?.id, 'call_ofm_1');
+    check('请求带上了工具定义', Array.isArray(gateway.requests[0]?.tools));
+
+    /* ---- a gateway that rejects stream_options ---- */
+    const picky = await startFakeOfm(['glm-5'], {
+      apiKey: 'ofm_local_key',
+      rejectStreamOptions: true,
+    });
+    try {
+      const pickyConfig = testConfig({
+        NAMI_DB_PATH: ':memory:',
+        NAMI_LLM_PROVIDER: 'ofm',
+        NAMI_OFM_URL: picky.url,
+        NAMI_LLM_API_KEY: 'ofm_local_key',
+        NAMI_LLM_MODEL: 'glm-5',
+      });
+      const pickyProvider = createProvider(pickyConfig);
+      const retried = await drain(pickyProvider.stream({ messages: [{ role: 'user', content: 'hi' }] }));
+      check('上游拒绝 stream_options 后自动重试成功', textOfChunks(retried).includes('这是 glm-5 的回答'));
+      equal('重试时去掉了 stream_options', picky.requests.length, 2);
+      equal('第二次请求确实没有 stream_options', picky.requests[1]?.stream_options, undefined);
+    } finally {
+      await picky.close();
+    }
+
+    /* ---- gateway down ---- */
+    const downConfig = testConfig({
+      NAMI_DB_PATH: ':memory:',
+      NAMI_LLM_PROVIDER: 'ofm',
+      // Nothing listens on port 1, so every probe is refused immediately.
+      NAMI_OFM_URL: 'http://127.0.0.1:1',
+      NAMI_LLM_MODEL: '',
+    });
+    const downProvider = createProvider(downConfig);
+    equal('探测失败时退回空清单，而不是抛错', (await downProvider.listModelInfo()).length, 0);
+    let streamError = '';
+    try {
+      await drain(downProvider.stream({ messages: [{ role: 'user', content: 'hi' }] }));
+    } catch (error) {
+      streamError = error instanceof Error ? error.message : String(error);
+    }
+    check('网关不可达时 stream 抛出可诊断的错误', streamError.length > 0, streamError);
+  } finally {
+    await gateway.close();
+  }
+}
+
+async function testOfmHosting(): Promise<void> {
+  section('把 OFM 免费模型中转出去');
+
+  const gateway = await startFakeOfm(['deepseek-v4.1-flash', 'glm-5', 'kimi-k3'], {
+    apiKey: 'ofm_local_key',
+  });
+
+  const fixture = await startServer('ofm-host', {
+    NAMI_LLM_PROVIDER: 'ofm',
+    NAMI_OFM_URL: gateway.url,
+    NAMI_LLM_API_KEY: 'ofm_local_key',
+    NAMI_LLM_MODEL: '',
+    NAMI_MODEL_ALIASES: 'gpt-4o-mini=deepseek-v4.1-flash,ghost-alias=not-installed:1b',
+    NAMI_MODELS_EXPOSE: 'gpt-4o-mini,deepseek-v4.1-flash,glm-5,ghost-alias',
+  });
+
+  try {
+    /* ---- boot-time discovery ---- */
+    const ready = await http(fixture, 'GET', '/readyz', { key: null });
+    equal('中转 OFM 后就绪', ready.status, 200);
+    const checks = (ready.json as { checks?: Record<string, string> }).checks ?? {};
+    equal('探针报告 provider=ofm', checks.provider, 'ofm');
+    equal('探针报告发现了 3 个模型', checks.models, '3 available');
+    equal('未配置模型时采用网关清单里的第一个', checks.model, 'deepseek-v4.1-flash');
+
+    const catalogue = await http(fixture, 'GET', '/v1/models', { key: fixture.key });
+    const ids = ((catalogue.json as { data?: Array<{ id: string }> }).data ?? []).map((m) => m.id);
+    check('目录含网关模型', ids.includes('glm-5'));
+    check('目录含别名', ids.includes('gpt-4o-mini'));
+    check('目录排除未暴露的模型', !ids.includes('kimi-k3'), ids.join(','));
+
+    /* ---- the contract the AstrBot plugin's relay mode depends on ---- */
+    const health = await http(fixture, 'GET', '/healthz', { key: null });
+    equal('插件中转模式会读 /healthz（无凭证）', health.status, 200);
+
+    gateway.requests.length = 0;
+    const chat = await http(fixture, 'POST', '/v1/chat/completions', {
+      key: fixture.key,
+      json: {
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: 'ping' }],
+        max_tokens: 16,
+      },
+    });
+    equal('插件式的非流式对话 → 200', chat.status, 200);
+    equal('上游收到的是别名指向的真名', gateway.requests[0]?.model, 'deepseek-v4.1-flash');
+    equal('响应回显客户端请求的名字', (chat.json as { model?: string }).model, 'gpt-4o-mini');
+    check(
+      '插件读到的 content 就是免费模型的回答',
+      String(
+        (chat.json as { choices?: Array<{ message?: { content?: string } }> }).choices?.[0]?.message
+          ?.content ?? '',
+      ).includes('这是 deepseek-v4.1-flash 的回答'),
+    );
+    equal('网关侧看到的是 OFM 本机 Key', gateway.authHeaders.at(-1), 'Bearer ofm_local_key');
+
+    /* ---- the full agent loop, through the relay ---- */
+    gateway.requests.length = 0;
+    const toolRun = await http(fixture, 'POST', '/v1/agent/run', {
+      key: fixture.key,
+      json: { stream: false, input: '现在几点', model: 'glm-5' },
+    });
+    equal('经中转的完整工具循环成功', toolRun.status, 200);
+    equal('发生了两轮上游调用', gateway.requests.length, 2);
+    const detail = toolRun.json as { output?: string; toolCallDetails?: unknown[] };
+    check('本地沙箱真实执行了 now 工具', (detail.toolCallDetails?.length ?? 0) > 0);
+    check(
+      '最终回答来自 OFM 网关',
+      String(detail.output ?? '').includes('工具已执行完毕'),
+      String(detail.output ?? ''),
+    );
+
+    /* ---- model policy errors ---- */
+    const notExposed = await http(fixture, 'POST', '/v1/chat/completions', {
+      key: fixture.key,
+      json: { model: 'kimi-k3', messages: [{ role: 'user', content: 'x' }] },
+    });
+    equal('未暴露的模型 → 403', notExposed.status, 403);
+
+    const missing = await http(fixture, 'POST', '/v1/chat/completions', {
+      key: fixture.key,
+      json: { model: 'ghost-alias', messages: [{ role: 'user', content: 'x' }] },
+    });
+    equal('已暴露但网关没有的模型 → 404', missing.status, 404);
+    check(
+      '错误码为 model_not_found',
+      (missing.json as { error?: { code?: string } })?.error?.code === 'model_not_found',
+    );
+
+    /* ---- the gateway dies after boot: a stale catalogue entry fails cleanly ---- */
+    const dying = await startFakeOfm(['glm-5']);
+    const dyingFixture = await startServer('ofm-dying', {
+      NAMI_LLM_PROVIDER: 'ofm',
+      NAMI_OFM_URL: dying.url,
+      NAMI_LLM_MODEL: '',
+    });
+    await dying.close();
+    const afterDeath = await http(dyingFixture, 'POST', '/v1/chat/completions', {
+      key: dyingFixture.key,
+      json: { model: 'glm-5', messages: [{ role: 'user', content: 'x' }] },
+    });
+    check(
+      '缓存仍在但网关已掉线时，请求以 5xx 失败而不是假装成功',
+      afterDeath.status >= 500,
+      `status=${afterDeath.status}`,
+    );
+    check(
+      '掉线的错误信息里带上了原因',
+      String((afterDeath.json as { error?: { message?: string } })?.error?.message ?? '').length > 0,
+    );
+  } finally {
+    await gateway.close();
+  }
+}
+
+async function testOfmUnavailable(): Promise<void> {
+  section('OFM 网关不可用时的降级行为');
+
+  const fixture = await startServer('ofm-down', {
+    NAMI_LLM_PROVIDER: 'ofm',
+    // Nothing listens on port 1, so every probe is refused immediately.
+    NAMI_OFM_URL: 'http://127.0.0.1:1',
+    NAMI_LLM_MODEL: '',
+  });
+
+  const health = await http(fixture, 'GET', '/healthz', { key: null });
+  equal('进程存活探针仍为 200', health.status, 200);
+
+  const ready = await http(fixture, 'GET', '/readyz', { key: null });
+  equal('网关不可达时 /readyz 返回 503', ready.status, 503);
+  const checks = (ready.json as { checks?: Record<string, string> }).checks ?? {};
+  equal('报告没有可用模型', checks.model, 'none selected');
+  check('报告探测失败原因', (checks.models ?? '').length > 0);
+
+  const models = await http(fixture, 'GET', '/v1/models', { key: fixture.key });
+  equal('/v1/models 仍可访问', models.status, 200);
+
+  const chat = await http(fixture, 'POST', '/v1/chat/completions', {
+    key: fixture.key,
+    json: { messages: [{ role: 'user', content: 'hi' }] },
+  });
+  equal('聊天请求给出可诊断的 404，而不是崩溃', chat.status, 404);
+  const message = String((chat.json as { error?: { message?: string } })?.error?.message ?? '');
+  check(
+    '错误信息指向 OFM 本地转发，而不是 Ollama',
+    message.includes('Our Free Model') && !message.includes('npm run ollama'),
+    message,
   );
 }
 
@@ -2932,6 +3498,10 @@ async function main(): Promise<void> {
     await testOllamaProvider();
     await testOllamaHosting();
     await testOllamaUnavailable();
+    await testOfmScript();
+    await testOfmProvider();
+    await testOfmHosting();
+    await testOfmUnavailable();
     testOneBotPure();
     await testOneBotConnector();
     await testOneBotTools();

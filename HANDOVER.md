@@ -34,7 +34,7 @@ node -v                     # 必须 >= 22.6，强烈推荐 24.x
 
 # ── ② 全量测试（类型检查 + 可移植性检查 + 端到端断言）──────────
 npm test                    # 期望：✗ 0 项失败
-                            # 407 项断言 + 324 项可移植性检查
+                            # 557 项断言 + 579 项可移植性检查
 
 # ── ③ AstrBot 插件的离线自检（独立于上面那套）─────────────────
 cd integrations && python3 selftest_plugin_nami.py && cd ..
@@ -67,8 +67,8 @@ curl -s localhost:8787/healthz
 | 内容 | 验证方式 | Windows | Linux | 说明 |
 | --- | --- | --- | --- | --- |
 | 类型检查（tsc，`erasableSyntaxOnly`） | `npm run typecheck` | ✅ 0 错误 | ⚠️ 推断 | tsc 本身跨平台 |
-| 端到端断言 407 项 | `npm run smoke` | ✅ 全过 | ❌ **未跑过** | 真实 HTTP / SSE / WebSocket / SQLite |
-| 可移植性静态检查 324 项 | `npm run check:portability` | ✅ 0 问题 | ⚠️ 推断 | 见下方「已静态排除的风险」 |
+| 端到端断言 557 项 | `npm run smoke` | ✅ 全过 | ❌ **未跑过** | 真实 HTTP / SSE / WebSocket / SQLite |
+| 可移植性静态检查 579 项 | `npm run check:portability` | ✅ 0 问题 | ⚠️ 推断 | 见下方「已静态排除的风险」 |
 | AstrBot 插件自检 448 项 | `python3 selftest_plugin_nami.py` | ✅ 全过 | ❌ **未跑过** | 纯标准库，跨平台风险低 |
 | **Docker 镜像构建** | `docker build` | ❌ 无 docker | ❌ **从未构建** | **最高风险项** |
 | **Alpine / musl 运行时** | 容器实跑 | ❌ | ❌ **从未运行** | 零原生依赖，理论上无风险 |
@@ -85,7 +85,7 @@ curl -s localhost:8787/healthz
 
 ### 已经静态排除的 Linux 风险
 
-`npm run check:portability` 逐条查这些，当前 **324 项检查 0 问题**：
+`npm run check:portability` 逐条查这些，当前 **579 项检查 0 问题**：
 
 - **模块路径大小写**：Windows 上 `./Types.ts` 能找到 `types.ts`，Linux 上直接 404。检查器对每个相对导入**逐段做精确大小写比对**（`existsSync` 不够——它在 Windows 上会放行错误大小写）。
 - **资源引用大小写**：`panel.html`、`docs.html`、`logo.png`、页面里的 `./app.js` / `./style.css`。
@@ -131,7 +131,7 @@ Nami 用 Node **内置**的 `node:sqlite`，不打原生模块。这对 alpine/m
 
 ### ⑤ `host.docker.internal` —— 只在需要连通宿主服务时
 
-Nami 跑容器、Ollama/SnowLuma 跑宿主机时，Linux **不像** Docker Desktop 那样自动提供 `host.docker.internal`。
+Nami 跑容器、Ollama/OFM/SnowLuma 跑宿主机时，Linux **不像** Docker Desktop 那样自动提供 `host.docker.internal`。
 
 **处置**：`docker run --add-host=host.docker.internal:host-gateway ...`，或直接用宿主的内网 IP。README 的 Docker 一节已提到。
 
@@ -153,7 +153,7 @@ neko-NamiServer/
 │   ├── core/types.ts           纯数据类型（无运行时依赖，避免循环引用）
 │   ├── llm/                    ★ 可插拔适配器
 │   │   ├── ollama.ts            原生 /api/chat（NDJSON），可控 num_ctx/keep_alive
-│   │   ├── openai.ts            任意 OpenAI 兼容端点
+│   │   ├── openai.ts            任意 OpenAI 兼容端点（provider=ofm 也复用它）
 │   │   ├── mock.ts              离线确定性桩模型
 │   │   └── router.ts            模型目录 + 按请求路由（别名/白名单/降级）
 │   ├── onebot/                 ★ QQ 桥
@@ -166,14 +166,15 @@ neko-NamiServer/
 │   ├── web/                    panel.html（管理面板）+ docs.html（API 参考）
 │   └── openapi.ts              OpenAPI 3.1 规范（由测试校验与路由一致）
 ├── scripts/
-│   ├── smoke.ts                端到端测试，407 项断言
-│   ├── check-portability.ts    ★ 跨平台静态检查，324 项
-│   └── ollama.ts               一键接入 Ollama 向导
+│   ├── smoke.ts                端到端测试，557 项断言
+│   ├── check-portability.ts    ★ 跨平台静态检查，579 项
+│   ├── ollama.ts               一键接入 Ollama 向导
+│   └── ofm.ts                  免费模型中转向导（探测 OFM 网关 → 写 .env）
 ├── integrations/               ★ 独立于运行时，不进 Docker 镜像
 │   ├── astrbot_plugin_nami/    AstrBot 插件（Python，零第三方依赖）
 │   └── selftest_plugin_nami.py 插件离线自检，448 项断言
 ├── Dockerfile / docker-compose.yml
-├── .env.example                ★ 全部 66 个环境变量的清单与默认值
+├── .env.example                ★ 全部 69 个环境变量的清单与默认值
 ├── .gitattributes              强制 LF
 └── README.md                   620 行中文文档（功能/配置/API/排障）
 ```
@@ -190,13 +191,14 @@ neko-NamiServer/
 | --- | --- |
 | OpenAPI 规范必须覆盖全部路由 | `scripts/smoke.ts` 的 `testOpenApiSurface`：拿实时路由表和规范**双向**比对，多一条少一条都失败 |
 | AstrBot 插件依赖的调用约定 | `testIntegrationContract`：带冒号的作用域会话 id、URL 编码的会话删除、`/readyz` 字段齐全 |
+| 免费模型接入插件（`astrbot_plugin_our_free_model`）的调用约定 | `testOfmHosting`：`/v1/models` 的名字清单、`/v1/chat/completions` 的非流式返回形状、无凭证的 `/healthz`+`/readyz`（并读到 `checks.provider=ofm`） |
 | OneBot 过滤逻辑的每条分支 | `testOneBotPure`：`decideEvent` 是纯函数，不启动服务器就能测 |
 | 环境变量全覆盖 | `.env.example` 与 `config.ts` 逐项对齐 |
 | 跨平台风险 | `scripts/check-portability.ts`，已并入 `npm test` |
 
 **加新端点时**：`src/openapi.ts` 的 `paths` 里必须加对应条目，否则 `npm test` 会失败——这是刻意的，规范不会静默漂移。
 
-**加新环境变量时**：改 `src/config.ts`，然后同步 `.env.example`。
+**加新环境变量时**：改 `src/config.ts`，然后同步 `.env.example`（给 WebUI 配置页用的话，还要加进 `src/config-schema.ts`）。
 
 ---
 
@@ -207,16 +209,17 @@ neko-NamiServer/
 ```bash
 NAMI_API_KEYS=key1,key2            # 客户端凭证；不设会随机生成并打印在日志里
 NAMI_ADMIN_TOKEN=...               # 管理接口凭证
-NAMI_LLM_PROVIDER=ollama           # mock（离线默认）| ollama | openai
+NAMI_LLM_PROVIDER=ollama           # mock（离线默认）| ollama | openai | ofm（中转免费模型网关）
 NAMI_LLM_MODEL=                    # 留空 = 启动时自动发现
 NAMI_ONEBOT_ENABLED=false          # QQ 桥，默认关
 NAMI_DB_PATH=/app/data/nami.sqlite
 ```
 
 三个容易配错的：
-- `NAMI_OLLAMA_URL` **不带** `/v1`（那是原生 API）；`NAMI_LLM_BASE_URL` **带** `/v1`。
+- `NAMI_OLLAMA_URL` 与 `NAMI_OFM_URL` **不带** `/v1`（都是原生/网关根地址）；`NAMI_LLM_BASE_URL` **带** `/v1`。
 - `NAMI_ONEBOT_EVENT_TOKEN`（别人调 Nami）与 `NAMI_ONEBOT_ACCESS_TOKEN`（Nami 调别人）是两个方向，别配反。
 - 入站端点没配 `NAMI_ONEBOT_EVENT_TOKEN` 时一律 `503`——刻意的，否则任何人都能靠发消息烧你的模型额度。
+- `provider=ofm` 时 `NAMI_LLM_API_KEY` 要填 OFM 的「**本机** Key」，不是「局域网 Key」；两个都设置时 `NAMI_OFM_URL` 优先于 `NAMI_OLLAMA_URL`。
 
 ---
 
@@ -231,6 +234,11 @@ NAMI_DB_PATH=/app/data/nami.sqlite
 4. **OneBot 未接过真实 QQ**：SnowLuma 需要 NTQQ 客户端，本机未部署。
 5. **管理面板未目视检查**：只做了 JS 语法校验、资源引用大小写检查、9 个端点与真实路由逐一核对。
 6. **`ruff` 未安装**，插件 Python 代码是手工按 ruff 风格写的（已程序化确认无超长行）。
+7. **OFM 中转未接过真实 OFM**：本机没有 `dsh-our-free-model`，也没有它的「本地转发」可开。`provider=ofm` 的模型发现、SSE 解析、工具调用、上游拒绝 `stream_options` 时的重试、上游掉线降级，全部是对着一个**假网关**（`scripts/smoke.ts` 的 `startFakeOfm`，覆盖 401 / 404 / 拒绝 stream_options 三条负面路径）验证的。
+   - `npm run ofm` 向导是**真跑过**的：连假网关、列模型、写 `.env`、以及 401 与「连不上」两条报错路径。
+   - `npm start` + 真实 HTTP 也跑过一遍：`/readyz` 报 `provider=ofm`、`/v1/models` 列出网关模型、非流式与 SSE 对话、未知模型 404 都对。
+   - **未核对**：真实 OFM 的 `/v1/models` 里除 `id` 外还有什么字段；以及它是否接受 Nami 在智能体模式下一定会发的 `tools` 字段（若某个免费车道不支持函数调用并因此报 400，那是 OFM 侧的问题，Nami 不重试去工具化）。
+   - 免费模型的可用性、计费与合规性由 OFM 与其上游决定，Nami 只是转发。
 
 ---
 
@@ -246,6 +254,7 @@ NAMI_DB_PATH=/app/data/nami.sqlite
 - [ ] 容器内 `curl localhost:8787/healthz` 是否正常：______
 - [ ] `docker stop` 是否干净退出（日志有无 `shutdown complete`）：______
 - [ ] 若装了 Ollama：`npm run ollama -- --write` 是否成功，真实对话是否正常：______
+- [ ] 若要用免费模型：OFM 的「本地转发」开着时 `npm run ofm -- --write` 是否成功、`npm start` 后 `/readyz` 的 `provider` 是否为 `ofm`、`/v1/models` 是否列出免费模型：______
 
 任何一项失败，请连同完整报错一起反馈——**第 2 节的表格就是用来定位「这是 Linux 特有的问题，还是原本就没验证过」的。**
 
